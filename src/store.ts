@@ -26,23 +26,20 @@ export class PostgresAgentStore implements AgentStore {
   }
 
   async initialize(): Promise<void> {
-    await this.pool.query(`
-      CREATE SCHEMA IF NOT EXISTS dorify_agent;
-      CREATE TABLE IF NOT EXISTS dorify_agent.agent_state (
-        state_key TEXT PRIMARY KEY,
-        state_value TEXT NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-      );
-      CREATE TABLE IF NOT EXISTS dorify_agent.command_inbox (
-        command_id UUID PRIMARY KEY,
-        command_type TEXT NOT NULL,
-        payload JSONB NOT NULL,
-        status TEXT NOT NULL,
-        result JSONB,
-        received_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        completed_at TIMESTAMPTZ
-      );
+    const result = await this.pool.query<{
+      agent_state: string | null;
+      command_inbox: string | null;
+    }>(`
+      SELECT
+        to_regclass('dorify_agent.agent_state')::TEXT AS agent_state,
+        to_regclass('dorify_agent.command_inbox')::TEXT AS command_inbox
     `);
+    const storage = result.rows[0];
+    if (!storage?.agent_state || !storage.command_inbox) {
+      throw new Error(
+        'Dorify agent storage is missing; apply dori-api database migrations before starting the agent',
+      );
+    }
   }
 
   async close(): Promise<void> {
