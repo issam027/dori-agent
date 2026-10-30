@@ -1,0 +1,188 @@
+openapi: 3.0.3
+info:
+  title: Dorify Cloud Edge Contract
+  version: 0.1.0
+  description: >-
+    Outbound-only contract used by autonomous Dorify installations. This API does not expose
+    business-configuration operations: sites, queues, services, schedules, counters, appointment
+    rules, notification templates, translations, branding, users, roles and assignments remain
+    locally administered for intra installations.
+servers:
+  - url: https://cloud.dorify.app
+security:
+  - installationToken: []
+paths:
+  /api/edge/v1/heartbeat:
+    post:
+      operationId: sendHeartbeat
+      summary: Report installation health and deployed versions
+      parameters:
+        - $ref: '#/components/parameters/InstallationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Heartbeat'
+      responses:
+        '204':
+          description: Heartbeat durably accepted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Installation identity does not match its credential
+  /api/edge/v1/commands:
+    get:
+      operationId: listInstallationCommands
+      summary: Pull allow-listed operational commands
+      parameters:
+        - $ref: '#/components/parameters/InstallationId'
+        - name: after
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Opaque cursor from the previous response
+      responses:
+        '200':
+          description: Ordered command page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [commands, nextCursor]
+                properties:
+                  commands:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Command'
+                  nextCursor:
+                    type: string
+                    nullable: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/edge/v1/commands/{commandId}/ack:
+    post:
+      operationId: acknowledgeInstallationCommand
+      summary: Confirm durable local receipt before execution
+      parameters:
+        - $ref: '#/components/parameters/InstallationId'
+        - $ref: '#/components/parameters/CommandId'
+      responses:
+        '204':
+          description: Receipt acknowledged
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/edge/v1/commands/{commandId}/result:
+    post:
+      operationId: completeInstallationCommand
+      summary: Report an idempotent command result
+      parameters:
+        - $ref: '#/components/parameters/InstallationId'
+        - $ref: '#/components/parameters/CommandId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandResult'
+      responses:
+        '204':
+          description: Result durably accepted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+components:
+  securitySchemes:
+    installationToken:
+      type: http
+      scheme: bearer
+      bearerFormat: installation-token
+  parameters:
+    InstallationId:
+      name: X-Dorify-Installation-Id
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+    CommandId:
+      name: commandId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  responses:
+    Unauthorized:
+      description: Missing, invalid or revoked installation credential
+  schemas:
+    Heartbeat:
+      type: object
+      additionalProperties: false
+      required: [installationId, sentAt, versions, health]
+      properties:
+        installationId:
+          type: string
+          format: uuid
+        sentAt:
+          type: string
+          format: date-time
+        versions:
+          type: object
+          additionalProperties: false
+          required: [engine, app, agent]
+          properties:
+            engine: { type: string }
+            app: { type: string }
+            agent: { type: string }
+        health:
+          type: object
+          additionalProperties: false
+          required: [agent, engine]
+          properties:
+            agent:
+              type: string
+              enum: [up]
+            engine:
+              type: string
+              enum: [ok, degraded, unreachable]
+    Command:
+      type: object
+      additionalProperties: false
+      required: [commandId, type, payload, createdAt, expiresAt]
+      properties:
+        commandId:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [RUN_HEALTH_CHECK, SYNC_NOW]
+        payload:
+          type: object
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+    CommandResult:
+      type: object
+      additionalProperties: false
+      required: [commandId, status, completedAt]
+      properties:
+        commandId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [SUCCEEDED, FAILED, EXPIRED]
+        completedAt:
+          type: string
+          format: date-time
+        output:
+          type: object
+          additionalProperties: true
+        error:
+          type: string
+          maxLength: 1000

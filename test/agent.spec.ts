@@ -1,0 +1,104 @@
+import { describe, expect, it } from 'vitest';
+import { DorifyAgent } from '../src/agent.js';
+import type { CloudClient } from '../src/cloud-client.js';
+import type { AgentConfig } from '../src/config.js';
+import type { EngineClient } from '../src/engine-client.js';
+import type { Logger } from '../src/logger.js';
+import type { AgentStore, StoredCommand } from '../src/store.js';
+import type { CloudCommand, CommandResult } from '../src/types.js';
+
+const config: AgentConfig = {
+  nodeEnv: 'test',
+  enabled: true,
+  port: 3100,
+  pollIntervalMs: 30_000,
+  requestTimeoutMs: 1_000,
+  databaseUrl: 'postgresql://unused',
+  engineUrl: 'http://engine:3000',
+  cloudUrl: 'https://cloud.dorify.app',
+  cloudToken: 'token',
+  installationId: '00000000-0000-4000-8000-000000000001',
+  versions: { engine: 'dev', app: 'dev', agent: '0.1.0' },
+};
+
+const silentLogger: Logger = {
+  info: () => undefined,
+  warn: () => undefined,
+  error: () => undefined,
+};
+
+class MemoryStore implements AgentStore {
+  cursor: string | null = null;
+  commands = new Map<string, StoredCommand>();
+  async initialize() {}
+  async close() {}
+  async ping() {}
+  async getCursor() {
+    return this.cursor;
+  }
+  async setCursor(cursor: string) {
+    this.cursor = cursor;
+  }
+  async reserveCommand(command: CloudCommand) {
+    const existing = this.commands.get(command.commandId);
+    if (existing) return existing;
+    this.commands.set(command.commandId, { status: 'RUNNING', result: null });
+    return null;
+  }
+  async completeCommand(result: CommandResult) {
+    this.commands.set(result.commandId, { status: result.status, result });
+  }
+}
+
+const engine: EngineClient = {
+  health: async () => ({ status: 'ok', checkedAt: new Date().toISOString() }),
+};
+
+describe('DorifyAgent', () => {
+  it('records a cloud outage without failing the autonomous local installation', async () => {
+    const cloud: CloudClient = {
+      sendHeartbeat: async () => {
+        throw new Error('offline');
+      },
+      getCommands: async () => ({ commands: [], nextCursor: null }),
+      acknowledgeCommand: async () => undefined,
+      sendCommandResult: async () => undefined,
+    };
+    const agent = new DorifyAgent(config, new MemoryStore(), engine, cloud, silentLogger);
+
+    await expect(agent.runCycle()).resolves.toBeUndefined();
+    expect(agent.getStatus()).toMatchObject({
+      consecutiveCloudFailures: 1,
+      lastCloudError: 'offline',
+    });
+  });
+
+  it('executes an allow-listed command once and replays its stored result', async () => {
+    const command: CloudCommand = {
+      commandId: '00000000-0000-4000-8000-000000000010',
+      type: 'RUN_HEALTH_CHECK',
+      payload: {},
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    const results: CommandResult[] = [];
+    const cloud: CloudClient = {
+      sendHeartbeat: async () => undefined,
+      getCommands: async () => ({ commands: [command], nextCursor: 'cursor-1' }),
+      acknowledgeCommand: async () => undefined,
+      sendCommandResult: async (result) => {
+        results.push(result);
+      },
+    };
+    const store = new MemoryStore();
+    const agent = new DorifyAgent(config, store, engine, cloud, silentLogger);
+
+    await agent.runCycle();
+    await agent.runCycle();
+
+    expect(results).toHaveLength(2);
+    expect(results[0]).toEqual(results[1]);
+    expect(results[0]?.status).toBe('SUCCEEDED');
+    expect(store.cursor).toBe('cursor-1');
+  });
+});

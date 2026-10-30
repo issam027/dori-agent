@@ -1,0 +1,43 @@
+name: dorify-edge
+
+services:
+  agent:
+    image: dorify/agent:dev
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      AGENT_ENABLED: ${AGENT_ENABLED:-false}
+      AGENT_PORT: 3100
+      AGENT_POLL_INTERVAL_MS: ${AGENT_POLL_INTERVAL_MS:-30000}
+      AGENT_REQUEST_TIMEOUT_MS: ${AGENT_REQUEST_TIMEOUT_MS:-10000}
+      DATABASE_URL: postgresql://dori:dori_password@postgres:5432/dori
+      DORIFY_ENGINE_URL: http://engine:3000
+      DORIFY_CLOUD_URL: ${DORIFY_CLOUD_URL:-https://cloud.dorify.app}
+      DORIFY_INSTALLATION_ID: ${DORIFY_INSTALLATION_ID:-00000000-0000-4000-8000-000000000000}
+      DORIFY_CLOUD_TOKEN: ${DORIFY_CLOUD_TOKEN:-disabled-agent-token-placeholder-000000}
+      DORIFY_ENGINE_VERSION: ${DORIFY_ENGINE_VERSION:-dev}
+      DORIFY_APP_VERSION: ${DORIFY_APP_VERSION:-dev}
+      DORIFY_AGENT_VERSION: ${DORIFY_AGENT_VERSION:-0.1.0}
+    ports:
+      - '127.0.0.1:3100:3100'
+    networks:
+      - dorify-network
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3100/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+networks:
+  dorify-network:
+    external: true
