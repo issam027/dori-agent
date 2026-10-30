@@ -110,6 +110,8 @@ export class DorifyAgent {
         });
         return;
       }
+      await this.synchronizeTracking();
+      await this.relayNotifications();
       const health = await this.engine.health();
       await this.cloud.sendHeartbeat(this.heartbeat(health));
       await this.processCommands();
@@ -119,6 +121,7 @@ export class DorifyAgent {
     } catch (error) {
       this.status.consecutiveCloudFailures += 1;
       this.status.lastCloudError = safeError(error);
+      await this.store.skipPendingNotifications('CLOUD_UNAVAILABLE').catch(() => undefined);
       await this.persistCurrentControl().catch((persistenceError: unknown) =>
         this.log.error('Failed to persist cloud control status', {
           error: safeError(persistenceError),
@@ -130,6 +133,23 @@ export class DorifyAgent {
       });
     } finally {
       this.cycleRunning = false;
+    }
+  }
+
+  private async synchronizeTracking(): Promise<void> {
+    if (!this.cloud) return;
+    await this.store.refreshTracking();
+    const items = await this.store.listUnsyncedTracking();
+    if (!items.length) return;
+    await this.cloud.syncTracking(items);
+    await this.store.markTrackingSynced(items);
+  }
+
+  private async relayNotifications(): Promise<void> {
+    if (!this.cloud) return;
+    for (const notification of await this.store.listPendingNotifications()) {
+      await this.cloud.relayNotification(notification);
+      await this.store.markNotificationRelayed(notification.notificationId);
     }
   }
 

@@ -31,6 +31,31 @@ export interface Heartbeat {
   health: { agent: 'up'; engine: EngineHealth['status'] };
 }
 
+export interface RelayNotification {
+  notificationId: string;
+  registrationId: string;
+  channel: 'sms' | 'email';
+  notificationType: 'welcome' | 'threshold';
+  locale: string;
+  recipient: string;
+  content: string;
+  createdAt: string;
+}
+
+export interface TrackingProjection {
+  tokenHash: string;
+  registrationId: string;
+  sequence: number;
+  ticketNumber: string;
+  registrationStatus: string;
+  position?: number;
+  estimatedWaitMinutes?: number;
+  counterName?: string;
+  queueName: string;
+  observedAt: string;
+  expiresAt: string;
+}
+
 export const installationStatusSchema = z.object({
   installationId: z.uuid(),
   deploymentStatus: z.enum(['active', 'revoked']),

@@ -8,6 +8,8 @@ import {
   type CommandResult,
   type Heartbeat,
   type InstallationStatus,
+  type RelayNotification,
+  type TrackingProjection,
 } from './types.js';
 
 export interface CloudClient {
@@ -16,6 +18,8 @@ export interface CloudClient {
   getCommands(cursor: string | null): Promise<CommandPage>;
   acknowledgeCommand(commandId: string): Promise<void>;
   sendCommandResult(result: CommandResult): Promise<void>;
+  relayNotification(notification: RelayNotification): Promise<void>;
+  syncTracking(items: TrackingProjection[]): Promise<void>;
 }
 
 export class HttpCloudClient implements CloudClient {
@@ -47,6 +51,14 @@ export class HttpCloudClient implements CloudClient {
 
   async sendCommandResult(result: CommandResult): Promise<void> {
     await this.request(`/api/edge/v1/commands/${result.commandId}/result`, 'POST', result);
+  }
+
+  async relayNotification(notification: RelayNotification): Promise<void> {
+    await this.request('/api/edge/v1/notifications', 'POST', notification);
+  }
+
+  async syncTracking(items: TrackingProjection[]): Promise<void> {
+    await this.request('/api/edge/v1/tracking', 'POST', { items });
   }
 
   private async request(path: string, method: 'GET' | 'POST', body?: unknown): Promise<unknown> {
