@@ -9,6 +9,7 @@ describe('cloud edge OpenAPI contract', () => {
     const contract = parse(source) as { openapi: string; paths: Record<string, unknown> };
     expect(contract.openapi).toBe('3.0.3');
     expect(Object.keys(contract.paths)).toEqual([
+      '/api/edge/v1/status',
       '/api/edge/v1/heartbeat',
       '/api/edge/v1/commands',
       '/api/edge/v1/commands/{commandId}/ack',

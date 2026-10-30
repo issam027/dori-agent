@@ -3,12 +3,15 @@ import { request as httpsRequest, type RequestOptions } from 'node:https';
 import type { AgentConfig } from './config.js';
 import {
   commandPageSchema,
+  installationStatusSchema,
   type CommandPage,
   type CommandResult,
   type Heartbeat,
+  type InstallationStatus,
 } from './types.js';
 
 export interface CloudClient {
+  getInstallationStatus(): Promise<InstallationStatus>;
   sendHeartbeat(heartbeat: Heartbeat): Promise<void>;
   getCommands(cursor: string | null): Promise<CommandPage>;
   acknowledgeCommand(commandId: string): Promise<void>;
@@ -22,6 +25,11 @@ export class HttpCloudClient implements CloudClient {
     > &
       Pick<AgentConfig, 'tls'>,
   ) {}
+
+  async getInstallationStatus(): Promise<InstallationStatus> {
+    const value = await this.request('/api/edge/v1/status', 'GET');
+    return installationStatusSchema.parse(value);
+  }
 
   async sendHeartbeat(heartbeat: Heartbeat): Promise<void> {
     await this.request('/api/edge/v1/heartbeat', 'POST', heartbeat);

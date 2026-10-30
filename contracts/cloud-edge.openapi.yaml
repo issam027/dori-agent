@@ -12,6 +12,18 @@ servers:
 security:
   - installationToken: []
 paths:
+  /api/edge/v1/status:
+    get:
+      summary: Return the administrative deployment status
+      parameters:
+        - $ref: '#/components/parameters/InstallationId'
+      responses:
+        '200':
+          description: Current deployment status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstallationStatus'
   /api/edge/v1/heartbeat:
     post:
       operationId: sendHeartbeat
@@ -116,6 +128,19 @@ components:
     Unauthorized:
       description: Missing, invalid or revoked installation credential
   schemas:
+    InstallationStatus:
+      type: object
+      required: [installationId, deploymentStatus, checkedAt]
+      properties:
+        installationId:
+          type: string
+          format: uuid
+        deploymentStatus:
+          type: string
+          enum: [active, inactive]
+        checkedAt:
+          type: string
+          format: date-time
     Heartbeat:
       type: object
       additionalProperties: false

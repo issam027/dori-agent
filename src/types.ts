@@ -31,6 +31,13 @@ export interface Heartbeat {
   health: { agent: 'up'; engine: EngineHealth['status'] };
 }
 
+export const installationStatusSchema = z.object({
+  installationId: z.uuid(),
+  deploymentStatus: z.enum(['active', 'inactive']),
+  checkedAt: z.iso.datetime(),
+});
+export type InstallationStatus = z.infer<typeof installationStatusSchema>;
+
 export type CommandResultStatus = 'SUCCEEDED' | 'FAILED' | 'EXPIRED';
 
 export interface CommandResult {
@@ -48,4 +55,6 @@ export interface AgentRuntimeStatus {
   lastCloudSuccessAt: string | null;
   lastCloudError: string | null;
   consecutiveCloudFailures: number;
+  deploymentStatus: 'active' | 'inactive' | 'unknown';
+  lastStatusCheckedAt: string | null;
 }

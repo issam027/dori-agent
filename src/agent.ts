@@ -32,6 +32,8 @@ export class DorifyAgent {
       lastCloudSuccessAt: null,
       lastCloudError: null,
       consecutiveCloudFailures: 0,
+      deploymentStatus: 'unknown',
+      lastStatusCheckedAt: null,
     };
   }
 
@@ -62,6 +64,18 @@ export class DorifyAgent {
     this.cycleRunning = true;
     this.status.lastCycleAt = new Date().toISOString();
     try {
+      const installation = await this.cloud.getInstallationStatus();
+      this.status.deploymentStatus = installation.deploymentStatus;
+      this.status.lastStatusCheckedAt = installation.checkedAt;
+      this.status.lastCloudSuccessAt = new Date().toISOString();
+      this.status.lastCloudError = null;
+      this.status.consecutiveCloudFailures = 0;
+      if (installation.deploymentStatus === 'inactive') {
+        this.log.warn('Installation is inactive in Dorify Cloud; local Dorify remains available', {
+          installationId: this.config.installationId,
+        });
+        return;
+      }
       const health = await this.engine.health();
       await this.cloud.sendHeartbeat(this.heartbeat(health));
       await this.processCommands();

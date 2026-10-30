@@ -57,6 +57,11 @@ const engine: EngineClient = {
 describe('DorifyAgent', () => {
   it('records a cloud outage without failing the autonomous local installation', async () => {
     const cloud: CloudClient = {
+      getInstallationStatus: async () => ({
+        installationId: config.installationId as string,
+        deploymentStatus: 'active',
+        checkedAt: new Date().toISOString(),
+      }),
       sendHeartbeat: async () => {
         throw new Error('offline');
       },
@@ -83,6 +88,11 @@ describe('DorifyAgent', () => {
     };
     const results: CommandResult[] = [];
     const cloud: CloudClient = {
+      getInstallationStatus: async () => ({
+        installationId: config.installationId as string,
+        deploymentStatus: 'active',
+        checkedAt: new Date().toISOString(),
+      }),
       sendHeartbeat: async () => undefined,
       getCommands: async () => ({ commands: [command], nextCursor: 'cursor-1' }),
       acknowledgeCommand: async () => undefined,
@@ -100,5 +110,36 @@ describe('DorifyAgent', () => {
     expect(results[0]).toEqual(results[1]);
     expect(results[0]?.status).toBe('SUCCEEDED');
     expect(store.cursor).toBe('cursor-1');
+  });
+
+  it('reports an inactive deployment without sending supervision traffic', async () => {
+    let heartbeatSent = false;
+    let commandsPulled = false;
+    const cloud: CloudClient = {
+      getInstallationStatus: async () => ({
+        installationId: config.installationId as string,
+        deploymentStatus: 'inactive',
+        checkedAt: new Date().toISOString(),
+      }),
+      sendHeartbeat: async () => {
+        heartbeatSent = true;
+      },
+      getCommands: async () => {
+        commandsPulled = true;
+        return { commands: [], nextCursor: null };
+      },
+      acknowledgeCommand: async () => undefined,
+      sendCommandResult: async () => undefined,
+    };
+    const agent = new DorifyAgent(config, new MemoryStore(), engine, cloud, silentLogger);
+
+    await agent.runCycle();
+
+    expect(agent.getStatus()).toMatchObject({
+      deploymentStatus: 'inactive',
+      consecutiveCloudFailures: 0,
+    });
+    expect(heartbeatSent).toBe(false);
+    expect(commandsPulled).toBe(false);
   });
 });
