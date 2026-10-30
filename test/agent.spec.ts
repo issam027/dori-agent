@@ -155,6 +155,7 @@ describe('DorifyAgent', () => {
   it('restores a revoked status after restart without requiring cloud access', async () => {
     const store = new MemoryStore();
     store.control = {
+      installationId: config.installationId,
       deploymentStatus: 'revoked',
       lastStatusCheckedAt: '2026-10-30T08:00:00.000Z',
       lastCloudSuccessAt: '2026-10-30T08:00:00.000Z',
@@ -167,6 +168,52 @@ describe('DorifyAgent', () => {
     expect(agent.getStatus()).toMatchObject({
       deploymentStatus: 'revoked',
       lastCloudError: 'offline',
+    });
+    await agent.stop();
+  });
+
+  it('rejects a cloud status issued for another installation identity', async () => {
+    const store = new MemoryStore();
+    const cloud: CloudClient = {
+      getInstallationStatus: async () => ({
+        installationId: '00000000-0000-4000-8000-000000000099',
+        deploymentStatus: 'revoked',
+        checkedAt: new Date().toISOString(),
+      }),
+      sendHeartbeat: async () => undefined,
+      getCommands: async () => ({ commands: [], nextCursor: null }),
+      acknowledgeCommand: async () => undefined,
+      sendCommandResult: async () => undefined,
+    };
+    const agent = new DorifyAgent(config, store, engine, cloud, silentLogger);
+
+    await agent.runCycle();
+
+    expect(agent.getStatus()).toMatchObject({
+      deploymentStatus: 'unknown',
+      consecutiveCloudFailures: 1,
+      lastCloudError: 'Cloud returned a status for another installation',
+    });
+    expect(store.control?.deploymentStatus).toBe('unknown');
+  });
+
+  it('does not carry a revoked status over to a newly configured identity', async () => {
+    const store = new MemoryStore();
+    store.control = {
+      installationId: '00000000-0000-4000-8000-000000000099',
+      deploymentStatus: 'revoked',
+      lastStatusCheckedAt: '2026-10-30T08:00:00.000Z',
+      lastCloudSuccessAt: '2026-10-30T08:00:00.000Z',
+      lastCloudError: null,
+    };
+    const agent = new DorifyAgent(config, store, engine, null, silentLogger);
+
+    await agent.start();
+
+    expect(agent.getStatus().deploymentStatus).toBe('unknown');
+    expect(store.control).toMatchObject({
+      installationId: config.installationId,
+      deploymentStatus: 'unknown',
     });
     await agent.stop();
   });

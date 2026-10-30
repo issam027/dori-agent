@@ -44,7 +44,26 @@ export class DorifyAgent {
   async start(): Promise<void> {
     await this.store.initialize();
     const persisted = await this.store.getDeploymentControl();
-    if (persisted) Object.assign(this.status, persisted);
+    if (
+      persisted &&
+      (!persisted.installationId ||
+        !this.config.enabled ||
+        persisted.installationId === this.config.installationId)
+    ) {
+      Object.assign(this.status, persisted);
+    } else if (persisted) {
+      this.log.warn('Ignoring deployment status stored for another installation', {
+        configuredInstallationId: this.config.installationId,
+        storedInstallationId: persisted.installationId,
+      });
+      await this.store.saveDeploymentControl({
+        installationId: this.config.installationId,
+        deploymentStatus: 'unknown',
+        lastStatusCheckedAt: null,
+        lastCloudSuccessAt: null,
+        lastCloudError: null,
+      });
+    }
     if (!this.config.enabled) {
       this.log.info('Agent is disabled; local Dorify remains fully autonomous');
       return;
@@ -67,8 +86,12 @@ export class DorifyAgent {
     this.status.lastCycleAt = new Date().toISOString();
     try {
       const installation = await this.cloud.getInstallationStatus();
+      if (installation.installationId !== this.config.installationId) {
+        throw new Error('Cloud returned a status for another installation');
+      }
       const cloudSuccessAt = new Date().toISOString();
       await this.store.saveDeploymentControl({
+        installationId: this.config.installationId,
         deploymentStatus: installation.deploymentStatus,
         lastStatusCheckedAt: installation.checkedAt,
         lastCloudSuccessAt: cloudSuccessAt,
@@ -112,6 +135,7 @@ export class DorifyAgent {
 
   private persistCurrentControl(): Promise<void> {
     return this.store.saveDeploymentControl({
+      installationId: this.config.installationId,
       deploymentStatus: this.status.deploymentStatus,
       lastStatusCheckedAt: this.status.lastStatusCheckedAt,
       lastCloudSuccessAt: this.status.lastCloudSuccessAt,

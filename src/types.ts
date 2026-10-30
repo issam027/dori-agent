@@ -60,6 +60,7 @@ export interface AgentRuntimeStatus {
 }
 
 export interface DeploymentControlState {
+  installationId?: string;
   deploymentStatus: AgentRuntimeStatus['deploymentStatus'];
   lastStatusCheckedAt: string | null;
   lastCloudSuccessAt: string | null;
