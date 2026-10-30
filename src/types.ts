@@ -33,7 +33,7 @@ export interface Heartbeat {
 
 export const installationStatusSchema = z.object({
   installationId: z.uuid(),
-  deploymentStatus: z.enum(['active', 'inactive']),
+  deploymentStatus: z.enum(['active', 'revoked']),
   checkedAt: z.iso.datetime(),
 });
 export type InstallationStatus = z.infer<typeof installationStatusSchema>;
@@ -55,6 +55,13 @@ export interface AgentRuntimeStatus {
   lastCloudSuccessAt: string | null;
   lastCloudError: string | null;
   consecutiveCloudFailures: number;
-  deploymentStatus: 'active' | 'inactive' | 'unknown';
+  deploymentStatus: 'active' | 'revoked' | 'unknown';
   lastStatusCheckedAt: string | null;
+}
+
+export interface DeploymentControlState {
+  deploymentStatus: AgentRuntimeStatus['deploymentStatus'];
+  lastStatusCheckedAt: string | null;
+  lastCloudSuccessAt: string | null;
+  lastCloudError: string | null;
 }

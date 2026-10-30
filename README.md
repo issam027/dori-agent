@@ -22,6 +22,8 @@ supervision, audit and allow-listed operational commands.
 - idempotent command results;
 - strict command allow-list: `RUN_HEALTH_CHECK`, `SYNC_NOW`;
 - retry with exponential backoff when the cloud is offline;
+- durable last-known `active` or `revoked` deployment status in local PostgreSQL;
+- local access remains blocked after revocation until a later authenticated cloud response reactivates it;
 - `/healthz` remains healthy during cloud outages;
 - optional mTLS client certificate support.
 
@@ -54,3 +56,5 @@ uncommitted `.env` with a real installation identity and set `AGENT_ENABLED=true
 - `GET /readyz`: the local persistent store is reachable.
 
 This distinction prevents a cloud outage from restarting or disabling a working intra installation.
+An outage never changes the last-known deployment decision: an active installation keeps working
+with a warning, while an already revoked installation remains blocked until cloud reactivation.

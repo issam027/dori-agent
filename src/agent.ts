@@ -43,6 +43,8 @@ export class DorifyAgent {
 
   async start(): Promise<void> {
     await this.store.initialize();
+    const persisted = await this.store.getDeploymentControl();
+    if (persisted) Object.assign(this.status, persisted);
     if (!this.config.enabled) {
       this.log.info('Agent is disabled; local Dorify remains fully autonomous');
       return;
@@ -65,13 +67,22 @@ export class DorifyAgent {
     this.status.lastCycleAt = new Date().toISOString();
     try {
       const installation = await this.cloud.getInstallationStatus();
-      this.status.deploymentStatus = installation.deploymentStatus;
-      this.status.lastStatusCheckedAt = installation.checkedAt;
-      this.status.lastCloudSuccessAt = new Date().toISOString();
-      this.status.lastCloudError = null;
+      const cloudSuccessAt = new Date().toISOString();
+      await this.store.saveDeploymentControl({
+        deploymentStatus: installation.deploymentStatus,
+        lastStatusCheckedAt: installation.checkedAt,
+        lastCloudSuccessAt: cloudSuccessAt,
+        lastCloudError: null,
+      });
+      Object.assign(this.status, {
+        deploymentStatus: installation.deploymentStatus,
+        lastStatusCheckedAt: installation.checkedAt,
+        lastCloudSuccessAt: cloudSuccessAt,
+        lastCloudError: null,
+      });
       this.status.consecutiveCloudFailures = 0;
-      if (installation.deploymentStatus === 'inactive') {
-        this.log.warn('Installation is inactive in Dorify Cloud; local Dorify remains available', {
+      if (installation.deploymentStatus === 'revoked') {
+        this.log.warn('Installation is revoked in Dorify Cloud; local access is blocked', {
           installationId: this.config.installationId,
         });
         return;
@@ -85,6 +96,11 @@ export class DorifyAgent {
     } catch (error) {
       this.status.consecutiveCloudFailures += 1;
       this.status.lastCloudError = safeError(error);
+      await this.persistCurrentControl().catch((persistenceError: unknown) =>
+        this.log.error('Failed to persist cloud control status', {
+          error: safeError(persistenceError),
+        }),
+      );
       this.log.warn('Cloud cycle failed; local Dorify is unaffected', {
         failures: this.status.consecutiveCloudFailures,
         error: this.status.lastCloudError,
@@ -92,6 +108,15 @@ export class DorifyAgent {
     } finally {
       this.cycleRunning = false;
     }
+  }
+
+  private persistCurrentControl(): Promise<void> {
+    return this.store.saveDeploymentControl({
+      deploymentStatus: this.status.deploymentStatus,
+      lastStatusCheckedAt: this.status.lastStatusCheckedAt,
+      lastCloudSuccessAt: this.status.lastCloudSuccessAt,
+      lastCloudError: this.status.lastCloudError,
+    });
   }
 
   private heartbeat(engineHealth: EngineHealth): Heartbeat {

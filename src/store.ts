@@ -1,5 +1,10 @@
 import pg from 'pg';
-import type { CloudCommand, CommandResult, CommandResultStatus } from './types.js';
+import type {
+  CloudCommand,
+  CommandResult,
+  CommandResultStatus,
+  DeploymentControlState,
+} from './types.js';
 
 const { Pool } = pg;
 
@@ -14,6 +19,8 @@ export interface AgentStore {
   ping(): Promise<void>;
   getCursor(): Promise<string | null>;
   setCursor(cursor: string): Promise<void>;
+  getDeploymentControl(): Promise<DeploymentControlState | null>;
+  saveDeploymentControl(state: DeploymentControlState): Promise<void>;
   reserveCommand(command: CloudCommand): Promise<StoredCommand | null>;
   completeCommand(result: CommandResult): Promise<void>;
 }
@@ -64,6 +71,34 @@ export class PostgresAgentStore implements AgentStore {
        ON CONFLICT (state_key) DO UPDATE
        SET state_value = EXCLUDED.state_value, updated_at = CURRENT_TIMESTAMP`,
       [cursor],
+    );
+  }
+
+  async getDeploymentControl(): Promise<DeploymentControlState | null> {
+    const result = await this.pool.query<{ state_value: string }>(
+      "SELECT state_value FROM dorify_agent.agent_state WHERE state_key = 'deployment_control'",
+    );
+    const value = result.rows[0]?.state_value;
+    if (!value) return null;
+    try {
+      return JSON.parse(value) as DeploymentControlState;
+    } catch {
+      return {
+        deploymentStatus: 'unknown',
+        lastStatusCheckedAt: null,
+        lastCloudSuccessAt: null,
+        lastCloudError: 'Stored deployment status is invalid',
+      };
+    }
+  }
+
+  async saveDeploymentControl(state: DeploymentControlState): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO dorify_agent.agent_state (state_key, state_value)
+       VALUES ('deployment_control', $1)
+       ON CONFLICT (state_key) DO UPDATE
+       SET state_value = EXCLUDED.state_value, updated_at = CURRENT_TIMESTAMP`,
+      [JSON.stringify(state)],
     );
   }
 

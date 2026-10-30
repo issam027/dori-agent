@@ -5,7 +5,7 @@ import type { AgentConfig } from '../src/config.js';
 import type { EngineClient } from '../src/engine-client.js';
 import type { Logger } from '../src/logger.js';
 import type { AgentStore, StoredCommand } from '../src/store.js';
-import type { CloudCommand, CommandResult } from '../src/types.js';
+import type { CloudCommand, CommandResult, DeploymentControlState } from '../src/types.js';
 
 const config: AgentConfig = {
   nodeEnv: 'test',
@@ -30,6 +30,7 @@ const silentLogger: Logger = {
 class MemoryStore implements AgentStore {
   cursor: string | null = null;
   commands = new Map<string, StoredCommand>();
+  control: DeploymentControlState | null = null;
   async initialize() {}
   async close() {}
   async ping() {}
@@ -38,6 +39,12 @@ class MemoryStore implements AgentStore {
   }
   async setCursor(cursor: string) {
     this.cursor = cursor;
+  }
+  async getDeploymentControl() {
+    return this.control;
+  }
+  async saveDeploymentControl(state: DeploymentControlState) {
+    this.control = { ...state };
   }
   async reserveCommand(command: CloudCommand) {
     const existing = this.commands.get(command.commandId);
@@ -112,13 +119,13 @@ describe('DorifyAgent', () => {
     expect(store.cursor).toBe('cursor-1');
   });
 
-  it('reports an inactive deployment without sending supervision traffic', async () => {
+  it('persists a revoked deployment without sending supervision traffic', async () => {
     let heartbeatSent = false;
     let commandsPulled = false;
     const cloud: CloudClient = {
       getInstallationStatus: async () => ({
         installationId: config.installationId as string,
-        deploymentStatus: 'inactive',
+        deploymentStatus: 'revoked',
         checkedAt: new Date().toISOString(),
       }),
       sendHeartbeat: async () => {
@@ -131,15 +138,36 @@ describe('DorifyAgent', () => {
       acknowledgeCommand: async () => undefined,
       sendCommandResult: async () => undefined,
     };
-    const agent = new DorifyAgent(config, new MemoryStore(), engine, cloud, silentLogger);
+    const store = new MemoryStore();
+    const agent = new DorifyAgent(config, store, engine, cloud, silentLogger);
 
     await agent.runCycle();
 
     expect(agent.getStatus()).toMatchObject({
-      deploymentStatus: 'inactive',
+      deploymentStatus: 'revoked',
       consecutiveCloudFailures: 0,
     });
+    expect(store.control?.deploymentStatus).toBe('revoked');
     expect(heartbeatSent).toBe(false);
     expect(commandsPulled).toBe(false);
+  });
+
+  it('restores a revoked status after restart without requiring cloud access', async () => {
+    const store = new MemoryStore();
+    store.control = {
+      deploymentStatus: 'revoked',
+      lastStatusCheckedAt: '2026-10-30T08:00:00.000Z',
+      lastCloudSuccessAt: '2026-10-30T08:00:00.000Z',
+      lastCloudError: 'offline',
+    };
+    const agent = new DorifyAgent({ ...config, enabled: false }, store, engine, null, silentLogger);
+
+    await agent.start();
+
+    expect(agent.getStatus()).toMatchObject({
+      deploymentStatus: 'revoked',
+      lastCloudError: 'offline',
+    });
+    await agent.stop();
   });
 });
