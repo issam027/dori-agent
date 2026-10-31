@@ -200,19 +200,27 @@ export class PostgresAgentStore implements AgentStore {
       ORDER BY updated_at LIMIT 100
     `);
     return result.rows.map((row) => ({
-      tokenHash: row.tracking_token_hash, registrationId: row.registration_id,
-      sequence: Number(row.sequence), ticketNumber: row.ticket_number,
-      registrationStatus: row.registration_status, position: row.position ?? undefined,
+      tokenHash: row.tracking_token_hash,
+      registrationId: row.registration_id,
+      sequence: Number(row.sequence),
+      ticketNumber: row.ticket_number,
+      registrationStatus: row.registration_status,
+      position: row.position ?? undefined,
       estimatedWaitMinutes: row.estimated_wait_minutes ?? undefined,
-      counterName: row.counter_name ?? undefined, queueName: row.queue_public_name,
-      observedAt: new Date(row.observed_at).toISOString(), expiresAt: new Date(row.expires_at).toISOString(),
+      counterName: row.counter_name ?? undefined,
+      queueName: row.queue_public_name,
+      observedAt: new Date(row.observed_at).toISOString(),
+      expiresAt: new Date(row.expires_at).toISOString(),
     }));
   }
 
   async markTrackingSynced(items: TrackingProjection[]): Promise<void> {
-    for (const item of items) await this.pool.query(
-      `UPDATE dorify.dori_public_tracking_state SET cloud_synced_sequence=$2
-       WHERE tracking_token_hash=$1 AND sequence=$2`, [item.tokenHash, item.sequence]);
+    for (const item of items)
+      await this.pool.query(
+        `UPDATE dorify.dori_public_tracking_state SET cloud_synced_sequence=$2
+       WHERE tracking_token_hash=$1 AND sequence=$2`,
+        [item.tokenHash, item.sequence],
+      );
   }
 
   async listPendingNotifications(): Promise<RelayNotification[]> {
@@ -223,24 +231,33 @@ export class PostgresAgentStore implements AgentStore {
       WHERE dispatch_route='cloud_relay' AND notification_status='pending'
       ORDER BY created_at LIMIT 50`);
     return result.rows.map((row) => ({
-      notificationId: row.notification_id, registrationId: row.registration_id,
-      channel: row.channel, notificationType: row.notification_type, locale: row.locale,
-      recipient: row.recipient, content: row.notification_content,
+      notificationId: row.notification_id,
+      registrationId: row.registration_id,
+      channel: row.channel,
+      notificationType: row.notification_type,
+      locale: row.locale,
+      recipient: row.recipient,
+      content: row.notification_content,
       createdAt: new Date(row.created_at).toISOString(),
     }));
   }
 
   async markNotificationRelayed(notificationId: string): Promise<void> {
-    await this.pool.query(`UPDATE dorify.dori_notification
+    await this.pool.query(
+      `UPDATE dorify.dori_notification
       SET notification_status='sent', provider='dorify-cloud', sent_at=CURRENT_TIMESTAMP,
           updated_at=CURRENT_TIMESTAMP WHERE notification_id=$1 AND notification_status='pending'`,
-      [notificationId]);
+      [notificationId],
+    );
   }
 
   async skipPendingNotifications(reason: string): Promise<void> {
-    await this.pool.query(`UPDATE dorify.dori_notification
+    await this.pool.query(
+      `UPDATE dorify.dori_notification
       SET notification_status='skipped_offline', dispatch_route='disabled_offline',
           failure_reason=$1, updated_at=CURRENT_TIMESTAMP
-      WHERE dispatch_route='cloud_relay' AND notification_status='pending'`, [reason]);
+      WHERE dispatch_route='cloud_relay' AND notification_status='pending'`,
+      [reason],
+    );
   }
 }

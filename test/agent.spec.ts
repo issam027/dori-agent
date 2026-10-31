@@ -56,9 +56,13 @@ class MemoryStore implements AgentStore {
     this.commands.set(result.commandId, { status: result.status, result });
   }
   async refreshTracking() {}
-  async listUnsyncedTracking() { return []; }
+  async listUnsyncedTracking() {
+    return [];
+  }
   async markTrackingSynced() {}
-  async listPendingNotifications() { return []; }
+  async listPendingNotifications() {
+    return [];
+  }
   async markNotificationRelayed() {}
   async skipPendingNotifications() {}
 }
