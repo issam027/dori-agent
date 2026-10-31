@@ -55,6 +55,12 @@ class MemoryStore implements AgentStore {
   async completeCommand(result: CommandResult) {
     this.commands.set(result.commandId, { status: result.status, result });
   }
+  async refreshTracking() {}
+  async listUnsyncedTracking() { return []; }
+  async markTrackingSynced() {}
+  async listPendingNotifications() { return []; }
+  async markNotificationRelayed() {}
+  async skipPendingNotifications() {}
 }
 
 const engine: EngineClient = {
@@ -75,6 +81,8 @@ describe('DorifyAgent', () => {
       getCommands: async () => ({ commands: [], nextCursor: null }),
       acknowledgeCommand: async () => undefined,
       sendCommandResult: async () => undefined,
+      relayNotification: async () => undefined,
+      syncTracking: async () => undefined,
     };
     const agent = new DorifyAgent(config, new MemoryStore(), engine, cloud, silentLogger);
 
@@ -106,6 +114,8 @@ describe('DorifyAgent', () => {
       sendCommandResult: async (result) => {
         results.push(result);
       },
+      relayNotification: async () => undefined,
+      syncTracking: async () => undefined,
     };
     const store = new MemoryStore();
     const agent = new DorifyAgent(config, store, engine, cloud, silentLogger);
@@ -137,6 +147,8 @@ describe('DorifyAgent', () => {
       },
       acknowledgeCommand: async () => undefined,
       sendCommandResult: async () => undefined,
+      relayNotification: async () => undefined,
+      syncTracking: async () => undefined,
     };
     const store = new MemoryStore();
     const agent = new DorifyAgent(config, store, engine, cloud, silentLogger);
@@ -184,6 +196,8 @@ describe('DorifyAgent', () => {
       getCommands: async () => ({ commands: [], nextCursor: null }),
       acknowledgeCommand: async () => undefined,
       sendCommandResult: async () => undefined,
+      relayNotification: async () => undefined,
+      syncTracking: async () => undefined,
     };
     const agent = new DorifyAgent(config, store, engine, cloud, silentLogger);
 
