@@ -156,7 +156,7 @@ export class PostgresAgentStore implements AgentStore {
         LEFT JOIN dorify.dori_operator_session os ON os.session_id=r.served_by_session_id
         WHERE r.is_active=TRUE AND r.registration_tracking_token_valid_until>CURRENT_TIMESTAMP
       ), incoming AS (
-        SELECT encode(digest(registration_tracking_token::text,'sha256'),'hex') AS token_hash,
+        SELECT encode(sha256(convert_to(registration_tracking_token::text,'UTF8')),'hex') AS token_hash,
                registration_id, ticket_number, status, position, counter_name, queue_name,
                registration_tracking_token_valid_until AS expires_at
         FROM ranked
