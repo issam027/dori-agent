@@ -89,7 +89,19 @@ export class HttpCloudClient implements CloudClient {
       const requestFn = url.protocol === 'https:' ? httpsRequest : httpRequest;
       const request = requestFn(options, (response) => {
         const chunks: Buffer[] = [];
-        response.on('data', (chunk: Buffer) => chunks.push(chunk));
+        let bytes = 0;
+        response.on('data', (chunk: Buffer) => {
+          bytes += chunk.length;
+          if (bytes > 2 * 1024 * 1024) {
+            request.destroy(new Error('Cloud response exceeds size limit'));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        response.on('error', reject);
+        response.on('aborted', () => {
+          reject(new Error('Cloud response aborted'));
+        });
         response.on('end', () => {
           const text = Buffer.concat(chunks).toString('utf8');
           const status = response.statusCode ?? 500;
@@ -107,6 +119,12 @@ export class HttpCloudClient implements CloudClient {
             reject(new Error('Cloud returned invalid JSON'));
           }
         });
+      });
+      const deadline = setTimeout(() => {
+        request.destroy(new Error('Cloud deadline exceeded'));
+      }, this.config.requestTimeoutMs);
+      request.once('close', () => {
+        clearTimeout(deadline);
       });
       request.on('timeout', () => request.destroy(new Error('Cloud request timed out')));
       request.on('error', reject);

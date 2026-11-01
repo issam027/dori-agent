@@ -12,6 +12,8 @@ const environmentSchema = z
     AGENT_ENABLED: booleanString,
     AGENT_PORT: z.coerce.number().int().min(1).max(65535).default(3100),
     AGENT_POLL_INTERVAL_MS: z.coerce.number().int().min(1000).max(3_600_000).default(30_000),
+    AGENT_SYNC_MAX_BATCHES: z.coerce.number().int().min(1).max(1000).default(100),
+    AGENT_SYNC_BUDGET_MS: z.coerce.number().int().min(1000).max(30000).default(10000),
     AGENT_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120_000).default(10_000),
     DATABASE_URL: z.string().url(),
     DORIFY_ENGINE_URL: z.string().url().default('http://engine:3000'),
@@ -55,6 +57,8 @@ export interface AgentConfig {
   port: number;
   pollIntervalMs: number;
   requestTimeoutMs: number;
+  syncMaxBatches?: number;
+  syncBudgetMs?: number;
   databaseUrl: string;
   engineUrl: string;
   cloudUrl?: string;
@@ -72,6 +76,8 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AgentC
     port: parsed.AGENT_PORT,
     pollIntervalMs: parsed.AGENT_POLL_INTERVAL_MS,
     requestTimeoutMs: parsed.AGENT_REQUEST_TIMEOUT_MS,
+    syncMaxBatches: parsed.AGENT_SYNC_MAX_BATCHES,
+    syncBudgetMs: parsed.AGENT_SYNC_BUDGET_MS,
     databaseUrl: parsed.DATABASE_URL,
     engineUrl: stripTrailingSlash(parsed.DORIFY_ENGINE_URL),
     cloudUrl: parsed.DORIFY_CLOUD_URL ? stripTrailingSlash(parsed.DORIFY_CLOUD_URL) : undefined,

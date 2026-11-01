@@ -3,7 +3,7 @@ import type { CloudClient } from './cloud-client.js';
 import type { EngineClient } from './engine-client.js';
 import type { Logger } from './logger.js';
 import { safeError } from './logger.js';
-import type { AgentStore, StoredCommand } from './store.js';
+import type { AgentStore } from './store.js';
 import type {
   AgentRuntimeStatus,
   CloudCommand,
@@ -14,8 +14,11 @@ import type {
 
 export class DorifyAgent {
   private timer: NodeJS.Timeout | null = null;
+  private controlTimer: NodeJS.Timeout | null = null;
   private stopped = false;
-  private cycleRunning = false;
+  private shutdownWork: Promise<void> | null = null;
+  private cycleWork: Promise<void> | null = null;
+  private controlWork: Promise<boolean> | null = null;
   private readonly status: AgentRuntimeStatus;
 
   constructor(
@@ -38,7 +41,12 @@ export class DorifyAgent {
   }
 
   getStatus(): AgentRuntimeStatus {
-    return { ...this.status };
+    return {
+      ...this.status,
+      heartbeatAgeMs: this.status.lastHeartbeatAt
+        ? Date.now() - Date.parse(this.status.lastHeartbeatAt)
+        : null,
+    };
   }
 
   async start(): Promise<void> {
@@ -52,10 +60,6 @@ export class DorifyAgent {
     ) {
       Object.assign(this.status, persisted);
     } else if (persisted) {
-      this.log.warn('Ignoring deployment status stored for another installation', {
-        configuredInstallationId: this.config.installationId,
-        storedInstallationId: persisted.installationId,
-      });
       await this.store.saveDeploymentControl({
         installationId: this.config.installationId,
         deploymentStatus: 'unknown',
@@ -65,92 +69,144 @@ export class DorifyAgent {
       });
     }
     if (!this.config.enabled) {
-      this.log.info('Agent is disabled; local Dorify remains fully autonomous');
+      this.log.info('Agent disabled; local installation remains autonomous');
       return;
     }
-    this.log.info('Agent started in outbound-only mode', {
-      installationId: this.config.installationId,
-    });
+    // Control-plane traffic never waits for tracking/notification backlogs.
+    this.controlTimer = setInterval(
+      () => {
+        void this.refreshControl().catch((error: unknown) => this.recordFailure(error));
+      },
+      Math.min(30_000, this.config.pollIntervalMs),
+    );
     this.schedule(0);
   }
 
-  async stop(): Promise<void> {
+  stop(): Promise<void> {
+    if (this.shutdownWork) return this.shutdownWork;
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
-    await this.store.close();
+    if (this.controlTimer) clearInterval(this.controlTimer);
+    this.shutdownWork = Promise.allSettled([this.cycleWork, this.controlWork]).then(async () => {
+      await this.store.close();
+    });
+    return this.shutdownWork;
   }
 
-  async runCycle(): Promise<void> {
-    if (this.cycleRunning || !this.config.enabled || !this.cloud) return;
-    this.cycleRunning = true;
+  runCycle(): Promise<void> {
+    if (this.stopped || !this.config.enabled || !this.cloud) return Promise.resolve();
+    if (this.cycleWork) return this.cycleWork;
+    this.cycleWork = this.performCycle().finally(() => {
+      this.cycleWork = null;
+    });
+    return this.cycleWork;
+  }
+
+  private async performCycle(): Promise<void> {
     this.status.lastCycleAt = new Date().toISOString();
+    const started = Date.now();
     try {
-      const installation = await this.cloud.getInstallationStatus();
-      if (installation.installationId !== this.config.installationId) {
-        throw new Error('Cloud returned a status for another installation');
-      }
-      const cloudSuccessAt = new Date().toISOString();
-      await this.store.saveDeploymentControl({
-        installationId: this.config.installationId,
-        deploymentStatus: installation.deploymentStatus,
-        lastStatusCheckedAt: installation.checkedAt,
-        lastCloudSuccessAt: cloudSuccessAt,
-        lastCloudError: null,
-      });
-      Object.assign(this.status, {
-        deploymentStatus: installation.deploymentStatus,
-        lastStatusCheckedAt: installation.checkedAt,
-        lastCloudSuccessAt: cloudSuccessAt,
-        lastCloudError: null,
-      });
-      this.status.consecutiveCloudFailures = 0;
-      if (installation.deploymentStatus === 'revoked') {
-        this.log.warn('Installation is revoked in Dorify Cloud; local access is blocked', {
-          installationId: this.config.installationId,
-        });
-        return;
-      }
+      if (!(await this.refreshControl()) || this.stopped) return;
+      await this.processCommands(Date.now() + (this.config.syncBudgetMs ?? 10_000));
       await this.synchronizeTracking();
       await this.relayNotifications();
-      const health = await this.engine.health();
-      await this.cloud.sendHeartbeat(this.heartbeat(health));
-      await this.processCommands();
-      this.status.lastCloudSuccessAt = new Date().toISOString();
+      if (this.store.getSyncMetrics)
+        this.status.synchronization = await this.store.getSyncMetrics();
       this.status.lastCloudError = null;
       this.status.consecutiveCloudFailures = 0;
-    } catch (error) {
-      this.status.consecutiveCloudFailures += 1;
-      this.status.lastCloudError = safeError(error);
-      await this.store.skipPendingNotifications('CLOUD_UNAVAILABLE').catch(() => undefined);
-      await this.persistCurrentControl().catch((persistenceError: unknown) =>
-        this.log.error('Failed to persist cloud control status', {
-          error: safeError(persistenceError),
-        }),
-      );
-      this.log.warn('Cloud cycle failed; local Dorify is unaffected', {
-        failures: this.status.consecutiveCloudFailures,
-        error: this.status.lastCloudError,
-      });
+      await this.persistCurrentControl();
+    } catch (error: unknown) {
+      await this.recordFailure(error);
     } finally {
-      this.cycleRunning = false;
+      this.status.lastCycleDurationMs = Date.now() - started;
     }
+  }
+
+  private refreshControl(): Promise<boolean> {
+    if (this.controlWork) return this.controlWork;
+    this.controlWork = this.performControl().finally(() => {
+      this.controlWork = null;
+    });
+    return this.controlWork;
+  }
+
+  private async performControl(): Promise<boolean> {
+    if (this.stopped || !this.cloud) return false;
+    const installation = await this.cloud.getInstallationStatus();
+    if (installation.installationId !== this.config.installationId) {
+      throw new Error('Cloud returned a status for another installation');
+    }
+    Object.assign(this.status, {
+      deploymentStatus: installation.deploymentStatus,
+      lastStatusCheckedAt: installation.checkedAt,
+      lastCloudSuccessAt: new Date().toISOString(),
+    });
+    await this.persistCurrentControl();
+    if (installation.deploymentStatus === 'revoked') return false;
+    const health = await this.engine.health();
+    await this.cloud.sendHeartbeat(this.heartbeat(health));
+    this.status.lastHeartbeatAt = new Date().toISOString();
+    return true;
+  }
+
+  private async recordFailure(error: unknown): Promise<void> {
+    this.status.consecutiveCloudFailures += 1;
+    this.status.lastCloudError = safeError(error);
+    if (!this.stopped) {
+      await this.store.skipPendingNotifications('CLOUD_UNAVAILABLE').catch(() => undefined);
+      await this.persistCurrentControl().catch((failure: unknown) => {
+        this.log.error('Failed to persist cloud control status', { error: safeError(failure) });
+      });
+    }
+    this.log.warn('Cloud cycle failed; local installation remains autonomous', {
+      failures: this.status.consecutiveCloudFailures,
+      error: this.status.lastCloudError,
+    });
   }
 
   private async synchronizeTracking(): Promise<void> {
-    if (!this.cloud) return;
+    if (!this.cloud || this.stopped || this.status.deploymentStatus !== 'active') return;
     await this.store.refreshTracking();
-    const items = await this.store.listUnsyncedTracking();
-    if (!items.length) return;
-    await this.cloud.syncTracking(items);
-    await this.store.markTrackingSynced(items);
+    const deadline = Date.now() + (this.config.syncBudgetMs ?? 10_000);
+    let sent = 0;
+    let batches = 0;
+    for (let batch = 0; batch < (this.config.syncMaxBatches ?? 100); batch++) {
+      if (this.stopped || Date.now() >= deadline || this.status.deploymentStatus !== 'active')
+        break;
+      // Reserve every fourth batch for FIFO backlog to prevent starvation.
+      const items = await this.store.listUnsyncedTracking(batch % 4 !== 3);
+      if (!items.length) break;
+      await this.cloud.syncTracking(items);
+      await this.store.markTrackingSynced(items);
+      sent += items.length;
+      batches++;
+    }
+    this.status.lastTrackingBatchCount = batches;
+    this.status.lastTrackingProjectionCount = sent;
   }
 
   private async relayNotifications(): Promise<void> {
-    if (!this.cloud) return;
-    for (const notification of await this.store.listPendingNotifications()) {
-      await this.cloud.relayNotification(notification);
-      await this.store.markNotificationRelayed(notification.notificationId);
-    }
+    if (!this.cloud || this.stopped || this.status.deploymentStatus !== 'active') return;
+    const items = await this.store.listPendingNotifications();
+    const deadline = Date.now() + (this.config.syncBudgetMs ?? 10_000);
+    let cursor = 0;
+    const results = await Promise.allSettled(
+      Array.from({ length: Math.min(3, items.length) }, async () => {
+        while (
+          cursor < items.length &&
+          Date.now() < deadline &&
+          !this.stopped &&
+          this.status.deploymentStatus === 'active'
+        ) {
+          const item = items[cursor++];
+          if (!item || !this.cloud) return;
+          await this.cloud.relayNotification(item);
+          await this.store.markNotificationRelayed(item.notificationId);
+        }
+      }),
+    );
+    const failed = results.find((result) => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
   }
 
   private persistCurrentControl(): Promise<void> {
@@ -172,30 +228,25 @@ export class DorifyAgent {
     };
   }
 
-  private async processCommands(): Promise<void> {
+  private async processCommands(deadline: number): Promise<void> {
     if (!this.cloud) return;
-    const cursor = await this.store.getCursor();
-    const page = await this.cloud.getCommands(cursor);
-    for (const command of page.commands) await this.processCommand(command);
-    if (page.nextCursor) await this.store.setCursor(page.nextCursor);
-  }
-
-  private async processCommand(command: CloudCommand): Promise<void> {
-    if (!this.cloud) return;
-    const existing = await this.store.reserveCommand(command);
-    if (existing) {
-      await this.replayExistingResult(existing);
-      return;
+    const page = await this.cloud.getCommands(await this.store.getCursor());
+    for (const command of page.commands) {
+      if (this.stopped || Date.now() >= deadline || this.status.deploymentStatus !== 'active')
+        return;
+      const existing = await this.store.reserveCommand(command);
+      if (existing) {
+        if (!existing.result) return; // A live lease must never advance the cursor.
+        await this.cloud.sendCommandResult(existing.result);
+      } else {
+        await this.cloud.acknowledgeCommand(command.commandId);
+        const result = await this.executeCommand(command);
+        await this.store.completeCommand(result);
+        await this.cloud.sendCommandResult(result);
+      }
+      // The edge API cursor is the last processed command UUID, including partial pages.
+      await this.store.setCursor(command.commandId);
     }
-
-    await this.cloud.acknowledgeCommand(command.commandId);
-    const result = await this.executeCommand(command);
-    await this.store.completeCommand(result);
-    await this.cloud.sendCommandResult(result);
-  }
-
-  private async replayExistingResult(existing: StoredCommand): Promise<void> {
-    if (existing.result && this.cloud) await this.cloud.sendCommandResult(existing.result);
   }
 
   private async executeCommand(command: CloudCommand): Promise<CommandResult> {
@@ -206,17 +257,13 @@ export class DorifyAgent {
         completedAt: new Date().toISOString(),
       };
     }
-
     try {
       if (command.type === 'RUN_HEALTH_CHECK') {
-        const health = await this.engine.health();
-        return this.success(command.commandId, { health });
+        return this.success(command.commandId, { health: await this.engine.health() });
       }
-      if (command.type === 'SYNC_NOW') {
-        return this.success(command.commandId, { accepted: true });
-      }
+      if (command.type === 'SYNC_NOW') return this.success(command.commandId, { accepted: true });
       return this.failure(command.commandId, 'Unsupported command');
-    } catch (error) {
+    } catch (error: unknown) {
       return this.failure(command.commandId, safeError(error));
     }
   }
@@ -224,21 +271,23 @@ export class DorifyAgent {
   private success(commandId: string, output: Record<string, unknown>): CommandResult {
     return { commandId, status: 'SUCCEEDED', completedAt: new Date().toISOString(), output };
   }
-
   private failure(commandId: string, error: string): CommandResult {
     return { commandId, status: 'FAILED', completedAt: new Date().toISOString(), error };
   }
-
   private schedule(delayMs: number): void {
     if (this.stopped) return;
     this.timer = setTimeout(() => {
-      void this.runCycle().finally(() => this.schedule(this.nextDelay()));
+      void this.runCycle().finally(() => {
+        this.schedule(this.nextDelay());
+      });
     }, delayMs);
   }
-
   private nextDelay(): number {
     if (this.status.consecutiveCloudFailures === 0) return this.config.pollIntervalMs;
     const exponent = Math.min(this.status.consecutiveCloudFailures - 1, 6);
-    return Math.min(this.config.pollIntervalMs * 2 ** exponent, 300_000);
+    return Math.min(
+      this.config.pollIntervalMs * 2 ** exponent * (0.8 + Math.random() * 0.4),
+      300_000,
+    );
   }
 }

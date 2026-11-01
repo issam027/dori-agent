@@ -17,7 +17,8 @@
     "test": "vitest run",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "npm run format:check && npm run typecheck && npm test && npm run build"
+    "check": "npm run audit:architecture && npm run format:check && npm run typecheck && npm test && npm run build",
+    "audit:architecture": "node tools/architecture-check.cjs"
   },
   "dependencies": {
     "pg": "^8.16.3",

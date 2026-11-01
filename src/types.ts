@@ -1,7 +1,6 @@
 import { z } from 'zod';
 
 export const commandTypeSchema = z.enum(['RUN_HEALTH_CHECK', 'SYNC_NOW']);
-export type CommandType = z.infer<typeof commandTypeSchema>;
 
 export const cloudCommandSchema = z.object({
   commandId: z.uuid(),
@@ -82,6 +81,17 @@ export interface AgentRuntimeStatus {
   consecutiveCloudFailures: number;
   deploymentStatus: 'active' | 'revoked' | 'unknown';
   lastStatusCheckedAt: string | null;
+  lastHeartbeatAt?: string;
+  heartbeatAgeMs?: number | null;
+  lastCycleDurationMs?: number;
+  lastTrackingBatchCount?: number;
+  lastTrackingProjectionCount?: number;
+  synchronization?: {
+    pendingTracking: number;
+    oldestPendingAgeMs: number;
+    runningCommands: number;
+    poolWaiting: number;
+  };
 }
 
 export interface DeploymentControlState {

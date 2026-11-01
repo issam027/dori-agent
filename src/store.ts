@@ -26,7 +26,13 @@ export interface AgentStore {
   reserveCommand(command: CloudCommand): Promise<StoredCommand | null>;
   completeCommand(result: CommandResult): Promise<void>;
   refreshTracking(): Promise<void>;
-  listUnsyncedTracking(): Promise<TrackingProjection[]>;
+  listUnsyncedTracking(preferLive?: boolean): Promise<TrackingProjection[]>;
+  getSyncMetrics?(): Promise<{
+    pendingTracking: number;
+    oldestPendingAgeMs: number;
+    runningCommands: number;
+    poolWaiting: number;
+  }>;
   markTrackingSynced(items: TrackingProjection[]): Promise<void>;
   listPendingNotifications(): Promise<RelayNotification[]>;
   markNotificationRelayed(notificationId: string): Promise<void>;
@@ -44,13 +50,15 @@ export class PostgresAgentStore implements AgentStore {
     const result = await this.pool.query<{
       agent_state: string | null;
       command_inbox: string | null;
+      tracking_contract: string | null;
     }>(`
       SELECT
         to_regclass('dorify_agent.agent_state')::TEXT AS agent_state,
-        to_regclass('dorify_agent.command_inbox')::TEXT AS command_inbox
+        to_regclass('dorify_agent.command_inbox')::TEXT AS command_inbox,
+        to_regprocedure('dorify_agent.refresh_tracking(timestamp with time zone)')::TEXT AS tracking_contract
     `);
     const storage = result.rows[0];
-    if (!storage?.agent_state || !storage.command_inbox) {
+    if (!storage?.agent_state || !storage.command_inbox || !storage.tracking_contract) {
       throw new Error(
         'Dorify agent storage is missing; apply dori-api database migrations before starting the agent',
       );
@@ -112,9 +120,10 @@ export class PostgresAgentStore implements AgentStore {
 
   async reserveCommand(command: CloudCommand): Promise<StoredCommand | null> {
     const inserted = await this.pool.query(
-      `INSERT INTO dorify_agent.command_inbox (command_id, command_type, payload, status)
-       VALUES ($1, $2, $3, 'RUNNING')
-       ON CONFLICT (command_id) DO NOTHING
+      `INSERT INTO dorify_agent.command_inbox (command_id, command_type, payload, status, lease_until)
+       VALUES ($1, $2, $3, 'RUNNING', CURRENT_TIMESTAMP + INTERVAL '2 minutes')
+       ON CONFLICT (command_id) DO UPDATE SET lease_until=CURRENT_TIMESTAMP + INTERVAL '2 minutes'
+       WHERE command_inbox.status='RUNNING' AND command_inbox.lease_until<CURRENT_TIMESTAMP
        RETURNING command_id`,
       [command.commandId, command.type, command.payload],
     );
@@ -134,70 +143,25 @@ export class PostgresAgentStore implements AgentStore {
   async completeCommand(result: CommandResult): Promise<void> {
     await this.pool.query(
       `UPDATE dorify_agent.command_inbox
-       SET status = $2, result = $3, completed_at = CURRENT_TIMESTAMP
+       SET status = $2, result = $3, completed_at = CURRENT_TIMESTAMP, lease_until=NULL
        WHERE command_id = $1`,
       [result.commandId, result.status, result],
     );
   }
 
   async refreshTracking(): Promise<void> {
-    await this.pool.query(`
-      WITH ranked AS (
-        SELECT r.registration_id, r.registration_tracking_token,
-               r.registration_tracking_token_valid_until, r.ticket_number, r.status,
-               q.queue_name,
-               CASE WHEN r.status='waiting' THEN
-                 ROW_NUMBER() OVER (PARTITION BY r.queue_id, r.business_date
-                   ORDER BY r.priority_reference_time, r.created_at, r.registration_id)::int
-                 WHEN r.status='in_progress' THEN 0 ELSE NULL END AS position,
-               os.counter_name
-        FROM dorify.dori_registration r
-        JOIN dorify.dori_queue q ON q.queue_id=r.queue_id
-        LEFT JOIN dorify.dori_operator_session os ON os.session_id=r.served_by_session_id
-        WHERE r.is_active=TRUE AND r.registration_tracking_token_valid_until>CURRENT_TIMESTAMP
-      ), incoming AS (
-        SELECT encode(sha256(convert_to(registration_tracking_token::text,'UTF8')),'hex') AS token_hash,
-               registration_id, ticket_number, status, position, counter_name, queue_name,
-               registration_tracking_token_valid_until AS expires_at
-        FROM ranked
-      )
-      INSERT INTO dorify.dori_public_tracking_state
-       (tracking_token_hash, registration_id, sequence, cloud_synced_sequence,
-        ticket_number, registration_status, position, estimated_wait_minutes,
-        counter_name, queue_public_name, observed_at, expires_at, updated_at)
-      SELECT token_hash, registration_id, 1, 0, ticket_number, status, position, NULL,
-             counter_name, queue_name, CURRENT_TIMESTAMP, expires_at, CURRENT_TIMESTAMP
-      FROM incoming
-      ON CONFLICT (tracking_token_hash) DO UPDATE SET
-        sequence=dorify.dori_public_tracking_state.sequence + 1,
-        ticket_number=EXCLUDED.ticket_number,
-        registration_status=EXCLUDED.registration_status,
-        position=EXCLUDED.position,
-        counter_name=EXCLUDED.counter_name,
-        queue_public_name=EXCLUDED.queue_public_name,
-        observed_at=CURRENT_TIMESTAMP,
-        expires_at=EXCLUDED.expires_at,
-        updated_at=CURRENT_TIMESTAMP
-      WHERE (dorify.dori_public_tracking_state.ticket_number,
-             dorify.dori_public_tracking_state.registration_status,
-             dorify.dori_public_tracking_state.position,
-             dorify.dori_public_tracking_state.counter_name,
-             dorify.dori_public_tracking_state.queue_public_name,
-             dorify.dori_public_tracking_state.expires_at)
-        IS DISTINCT FROM
-            (EXCLUDED.ticket_number, EXCLUDED.registration_status, EXCLUDED.position,
-             EXCLUDED.counter_name, EXCLUDED.queue_public_name, EXCLUDED.expires_at)
-    `);
+    await this.pool.query('SELECT dorify_agent.refresh_tracking()');
   }
 
-  async listUnsyncedTracking(): Promise<TrackingProjection[]> {
+  async listUnsyncedTracking(preferLive = false): Promise<TrackingProjection[]> {
     const result = await this.pool.query(`
       SELECT tracking_token_hash, registration_id, sequence, ticket_number,
              registration_status, position, estimated_wait_minutes, counter_name,
              queue_public_name, observed_at, expires_at
       FROM dorify.dori_public_tracking_state
       WHERE registration_id IS NOT NULL AND sequence>cloud_synced_sequence
-      ORDER BY updated_at LIMIT 100
+      ORDER BY ${preferLive ? "CASE WHEN registration_status IN ('waiting','in_progress') THEN 0 ELSE 1 END," : ''}
+        updated_at,tracking_token_hash LIMIT 100
     `);
     return result.rows.map((row) => ({
       tokenHash: row.tracking_token_hash,
@@ -215,12 +179,35 @@ export class PostgresAgentStore implements AgentStore {
   }
 
   async markTrackingSynced(items: TrackingProjection[]): Promise<void> {
-    for (const item of items)
-      await this.pool.query(
-        `UPDATE dorify.dori_public_tracking_state SET cloud_synced_sequence=$2
-       WHERE tracking_token_hash=$1 AND sequence=$2`,
-        [item.tokenHash, item.sequence],
-      );
+    if (!items.length) return;
+    await this.pool.query(
+      `UPDATE dorify.dori_public_tracking_state state
+       SET cloud_synced_sequence=ack.sequence
+       FROM jsonb_to_recordset($1::jsonb) AS ack(token_hash text,sequence bigint)
+       WHERE state.tracking_token_hash=ack.token_hash AND state.sequence=ack.sequence
+         AND state.cloud_synced_sequence<ack.sequence`,
+      [
+        JSON.stringify(
+          items.map((item) => ({ token_hash: item.tokenHash, sequence: item.sequence })),
+        ),
+      ],
+    );
+  }
+
+  async getSyncMetrics() {
+    const result = await this.pool.query(`SELECT
+      COUNT(*)::int AS pending,
+      COALESCE(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP-MIN(updated_at)))*1000,0)::float8 AS oldest
+      FROM dorify.dori_public_tracking_state WHERE sequence>cloud_synced_sequence`);
+    const running = await this.pool.query(
+      "SELECT COUNT(*)::int AS count FROM dorify_agent.command_inbox WHERE status='RUNNING'",
+    );
+    return {
+      pendingTracking: Number(result.rows[0]?.pending ?? 0),
+      oldestPendingAgeMs: Number(result.rows[0]?.oldest ?? 0),
+      runningCommands: Number(running.rows[0]?.count ?? 0),
+      poolWaiting: this.pool.waitingCount,
+    };
   }
 
   async listPendingNotifications(): Promise<RelayNotification[]> {

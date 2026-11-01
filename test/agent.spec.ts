@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { DorifyAgent } from '../src/agent.js';
 import type { CloudClient } from '../src/cloud-client.js';
 import type { AgentConfig } from '../src/config.js';
@@ -56,7 +56,7 @@ class MemoryStore implements AgentStore {
     this.commands.set(result.commandId, { status: result.status, result });
   }
   async refreshTracking() {}
-  async listUnsyncedTracking() {
+  async listUnsyncedTracking(): Promise<import('../src/types.js').TrackingProjection[]> {
     return [];
   }
   async markTrackingSynced() {}
@@ -130,7 +130,7 @@ describe('DorifyAgent', () => {
     expect(results).toHaveLength(2);
     expect(results[0]).toEqual(results[1]);
     expect(results[0]?.status).toBe('SUCCEEDED');
-    expect(store.cursor).toBe('cursor-1');
+    expect(store.cursor).toBe(command.commandId);
   });
 
   it('persists a revoked deployment without sending supervision traffic', async () => {
@@ -234,5 +234,130 @@ describe('DorifyAgent', () => {
       deploymentStatus: 'unknown',
     });
     await agent.stop();
+  });
+});
+describe('agent operational guarantees', () => {
+  function activeCloud(overrides: Partial<CloudClient> = {}): CloudClient {
+    return {
+      getInstallationStatus: async () => ({
+        installationId: config.installationId as string,
+        deploymentStatus: 'active',
+        checkedAt: new Date().toISOString(),
+      }),
+      sendHeartbeat: async () => undefined,
+      getCommands: async () => ({ commands: [], nextCursor: null }),
+      acknowledgeCommand: async () => undefined,
+      sendCommandResult: async () => undefined,
+      relayNotification: async () => undefined,
+      syncTracking: async () => undefined,
+      ...overrides,
+    };
+  }
+
+  it('keeps data-plane backoff after successful control heartbeats', async () => {
+    let failing = true;
+    const cloud = activeCloud({
+      getCommands: () =>
+        failing
+          ? Promise.reject(new Error('transfer unavailable'))
+          : Promise.resolve({ commands: [], nextCursor: null }),
+    });
+    const agent = new DorifyAgent(config, new MemoryStore(), engine, cloud, silentLogger);
+    await agent.runCycle();
+    await agent.runCycle();
+    expect(agent.getStatus().consecutiveCloudFailures).toBe(2);
+    failing = false;
+    await agent.runCycle();
+    expect(agent.getStatus().consecutiveCloudFailures).toBe(0);
+    expect(agent.getStatus().lastCloudError).toBeNull();
+  });
+
+  it('sends bounded batches and gives heartbeat priority over the backlog', async () => {
+    const order: string[] = [];
+    const store = new MemoryStore();
+    const item = {
+      tokenHash: 'a'.repeat(64),
+      registrationId: 'registration',
+      sequence: 1,
+      ticketNumber: 'A1',
+      registrationStatus: 'waiting',
+      queueName: 'Test',
+      observedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+    };
+    store.listUnsyncedTracking = async () => Array.from({ length: 100 }, () => item);
+    let acknowledged = 0;
+    store.markTrackingSynced = async () => {
+      acknowledged++;
+    };
+    const cloud = activeCloud({
+      sendHeartbeat: async () => {
+        order.push('heartbeat');
+      },
+      syncTracking: async () => {
+        order.push('tracking');
+      },
+    });
+    const agent = new DorifyAgent(
+      { ...config, syncMaxBatches: 2 },
+      store,
+      engine,
+      cloud,
+      silentLogger,
+    );
+    await agent.runCycle();
+    expect(order).toEqual(['heartbeat', 'tracking', 'tracking']);
+    expect(acknowledged).toBe(2);
+    expect(agent.getStatus().lastTrackingBatchCount).toBe(2);
+    expect(agent.getStatus().lastTrackingProjectionCount).toBe(200);
+  });
+
+  it('waits for a running cycle before closing the database and tolerates repeated stop', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const store = new MemoryStore();
+    let closed = 0;
+    store.close = async () => {
+      closed++;
+    };
+    store.refreshTracking = async () => gate;
+    const agent = new DorifyAgent(config, store, engine, activeCloud(), silentLogger);
+    const cycle = agent.runCycle();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const stopped = agent.stop();
+    expect(closed).toBe(0);
+    release();
+    await Promise.all([cycle, stopped, agent.stop()]);
+    expect(closed).toBe(1);
+  });
+
+  it('keeps sending control heartbeats while tracking is blocked', async () => {
+    vi.useFakeTimers();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const store = new MemoryStore();
+    store.refreshTracking = async () => gate;
+    const sendHeartbeat = vi.fn(async () => undefined);
+    const agent = new DorifyAgent(
+      config,
+      store,
+      engine,
+      activeCloud({ sendHeartbeat }),
+      silentLogger,
+    );
+    try {
+      await agent.start();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(sendHeartbeat.mock.calls.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      release();
+      await agent.stop();
+      vi.useRealTimers();
+    }
   });
 });
