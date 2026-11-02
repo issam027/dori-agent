@@ -11,10 +11,13 @@ export class HttpEngineClient implements EngineClient {
   async health(): Promise<EngineHealth> {
     const checkedAt = new Date().toISOString();
     try {
-      const response = await fetch(`${this.config.engineUrl}/api/v1/monitoring/health`, {
-        signal: AbortSignal.timeout(this.config.requestTimeoutMs),
-        headers: { Accept: 'application/json' },
-      });
+      const response = await fetch(
+        `${this.config.engineUrl.replace(/\/+$/, '')}/api/v1/monitoring/health`,
+        {
+          signal: AbortSignal.timeout(this.config.requestTimeoutMs),
+          headers: { Accept: 'application/json' },
+        },
+      );
       if (!response.ok) {
         return { status: 'degraded', checkedAt, details: { httpStatus: response.status } };
       }
