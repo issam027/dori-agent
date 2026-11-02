@@ -1,3 +1,4 @@
+import { CloudHttpError } from '../src/cloud-client.js';
 import { describe, expect, it, vi } from 'vitest';
 import { DorifyAgent } from '../src/agent.js';
 import type { CloudClient } from '../src/cloud-client.js';
@@ -389,4 +390,38 @@ describe('agent operational guarantees', () => {
       vi.useRealTimers();
     }
   });
+});
+
+it.each(['expired', 'refused'] as const)('never executes a %s command', async (kind) => {
+  const command: CloudCommand = {
+    commandId: '00000000-0000-4000-8000-000000000010',
+    type: 'RUN_HEALTH_CHECK',
+    payload: {},
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + (kind === 'expired' ? -1000 : 60000)).toISOString(),
+  };
+  const acknowledgeCommand = vi.fn(async () => {
+    throw new CloudHttpError(409);
+  });
+  const health = vi.fn(async () => ({ status: 'ok', checkedAt: new Date().toISOString() }));
+  const cloud: CloudClient = {
+    getInstallationStatus: async () => ({
+      installationId: config.installationId as string,
+      deploymentStatus: 'active',
+      checkedAt: new Date().toISOString(),
+    }),
+    sendHeartbeat: async () => undefined,
+    getCommands: async () => ({ commands: [command], nextCursor: null }),
+    acknowledgeCommand,
+    sendCommandResult: vi.fn(),
+    relayNotification: async () => undefined,
+    syncTracking: async () => undefined,
+  };
+  const store = new MemoryStore();
+  await new DorifyAgent(config, store, { health }, cloud, silentLogger).runCycle();
+  // One health probe is the normal heartbeat; the rejected command adds none.
+  expect(health).toHaveBeenCalledTimes(1);
+  expect(cloud.sendCommandResult).not.toHaveBeenCalled();
+  expect(acknowledgeCommand).toHaveBeenCalledTimes(kind === 'expired' ? 0 : 1);
+  expect(store.cursor).toBe(command.commandId);
 });

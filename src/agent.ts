@@ -1,3 +1,4 @@
+import { CloudHttpError } from './cloud-client.js';
 import type { AgentConfig } from './config.js';
 import type { CloudClient } from './cloud-client.js';
 import type { EngineClient } from './engine-client.js';
@@ -247,12 +248,27 @@ export class DorifyAgent {
     for (const command of page.commands) {
       if (this.stopped || Date.now() >= deadline || this.status.deploymentStatus !== 'active')
         return;
+      if (Date.parse(command.expiresAt) <= Date.now()) {
+        await this.store.setCursor(command.commandId);
+        continue;
+      }
       const existing = await this.store.reserveCommand(command);
       if (existing) {
         if (!existing.result) return; // A live lease must never advance the cursor.
         await this.cloud.sendCommandResult(existing.result);
       } else {
-        await this.cloud.acknowledgeCommand(command.commandId);
+        try {
+          await this.cloud.acknowledgeCommand(command.commandId);
+        } catch (error) {
+          if (!(error instanceof CloudHttpError) || error.status !== 409) throw error;
+          await this.store.completeCommand({
+            commandId: command.commandId,
+            status: 'EXPIRED',
+            completedAt: new Date().toISOString(),
+          });
+          await this.store.setCursor(command.commandId);
+          continue;
+        }
         const result = await this.executeCommand(command);
         await this.store.completeCommand(result);
         await this.cloud.sendCommandResult(result);

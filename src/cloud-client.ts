@@ -12,6 +12,12 @@ import {
   type TrackingProjection,
 } from './types.js';
 
+export class CloudHttpError extends Error {
+  constructor(readonly status: number) {
+    super('Cloud returned HTTP ' + String(status));
+  }
+}
+
 export interface CloudClient {
   getInstallationStatus(): Promise<InstallationStatus>;
   sendHeartbeat(heartbeat: Heartbeat): Promise<void>;
@@ -106,7 +112,7 @@ export class HttpCloudClient implements CloudClient {
           const text = Buffer.concat(chunks).toString('utf8');
           const status = response.statusCode ?? 500;
           if (status < 200 || status >= 300) {
-            reject(new Error(`Cloud returned HTTP ${status}`));
+            reject(new CloudHttpError(status));
             return;
           }
           if (!text) {
