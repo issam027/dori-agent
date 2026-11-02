@@ -360,4 +360,33 @@ describe('agent operational guarantees', () => {
       vi.useRealTimers();
     }
   });
+
+  it('coalesces database notifications into an immediate cycle without waiting for the safety interval', async () => {
+    vi.useFakeTimers();
+    const store = new MemoryStore();
+    let changed: () => void = () => undefined;
+    Object.assign(store, {
+      watchTrackingChanges: (callback: () => void) => {
+        changed = callback;
+        return Promise.resolve();
+      },
+    });
+    const refresh = vi.spyOn(store, 'refreshTracking');
+    const agent = new DorifyAgent(config, store, engine, activeCloud(), silentLogger);
+    try {
+      await agent.start();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(refresh).toHaveBeenCalledTimes(1);
+      changed();
+      changed();
+      changed();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(refresh).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(refresh).toHaveBeenCalledTimes(2);
+    } finally {
+      await agent.stop();
+      vi.useRealTimers();
+    }
+  });
 });

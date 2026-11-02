@@ -17,6 +17,7 @@ export interface StoredCommand {
 
 export interface AgentStore {
   initialize(): Promise<void>;
+  watchTrackingChanges?(onChange: () => void): Promise<void>;
   close(): Promise<void>;
   ping(): Promise<void>;
   getCursor(): Promise<string | null>;
@@ -41,8 +42,9 @@ export interface AgentStore {
 
 export class PostgresAgentStore implements AgentStore {
   private readonly pool: pg.Pool;
+  private listener: pg.Client | null = null;
 
-  constructor(databaseUrl: string) {
+  constructor(private readonly databaseUrl: string) {
     this.pool = new Pool({ connectionString: databaseUrl, max: 3 });
   }
 
@@ -65,7 +67,30 @@ export class PostgresAgentStore implements AgentStore {
     }
   }
 
+  async watchTrackingChanges(onChange: () => void): Promise<void> {
+    if (this.listener) return;
+    const client = new pg.Client({ connectionString: this.databaseUrl });
+    client.on('notification', (message) => {
+      if (message.channel === 'dorify_tracking_dirty') onChange();
+    });
+    client.on('error', () => {
+      if (this.listener === client) this.listener = null;
+      void client.end().catch(() => undefined);
+    });
+    try {
+      await client.connect();
+      await client.query('LISTEN dorify_tracking_dirty');
+      this.listener = client;
+    } catch (error) {
+      await client.end().catch(() => undefined);
+      throw error;
+    }
+  }
+
   async close(): Promise<void> {
+    const listener = this.listener;
+    this.listener = null;
+    await listener?.end().catch(() => undefined);
     await this.pool.end();
   }
 

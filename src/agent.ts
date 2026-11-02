@@ -16,6 +16,7 @@ export class DorifyAgent {
   private timer: NodeJS.Timeout | null = null;
   private controlTimer: NodeJS.Timeout | null = null;
   private stopped = false;
+  private trackingWakeRequested = false;
   private shutdownWork: Promise<void> | null = null;
   private cycleWork: Promise<void> | null = null;
   private controlWork: Promise<boolean> | null = null;
@@ -106,6 +107,18 @@ export class DorifyAgent {
     this.status.lastCycleAt = new Date().toISOString();
     const started = Date.now();
     try {
+      // Re-establish LISTEN after a database disconnect; periodic cycles recover missed events.
+      await this.store
+        .watchTrackingChanges?.(() => {
+          if (this.stopped) return;
+          this.trackingWakeRequested = true;
+          if (!this.cycleWork && this.status.consecutiveCloudFailures === 0) this.schedule(100);
+        })
+        .catch((error: unknown) =>
+          this.log.warn('Tracking LISTEN unavailable; periodic recovery remains active', {
+            error: safeError(error),
+          }),
+        );
       if (!(await this.refreshControl()) || this.stopped) return;
       await this.processCommands(Date.now() + (this.config.syncBudgetMs ?? 10_000));
       await this.synchronizeTracking();
@@ -275,10 +288,17 @@ export class DorifyAgent {
     return { commandId, status: 'FAILED', completedAt: new Date().toISOString(), error };
   }
   private schedule(delayMs: number): void {
+    if (this.timer) clearTimeout(this.timer);
     if (this.stopped) return;
     this.timer = setTimeout(() => {
+      this.trackingWakeRequested = false;
       void this.runCycle().finally(() => {
-        this.schedule(this.nextDelay());
+        const delay =
+          this.trackingWakeRequested && this.status.consecutiveCloudFailures === 0
+            ? 100
+            : this.nextDelay();
+        this.trackingWakeRequested = false;
+        this.schedule(delay);
       });
     }, delayMs);
   }
