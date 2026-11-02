@@ -73,6 +73,9 @@ export class PostgresAgentStore implements AgentStore {
     client.on('notification', (message) => {
       if (message.channel === 'dorify_tracking_dirty') onChange();
     });
+    client.on('end', () => {
+      if (this.listener === client) this.listener = null;
+    });
     client.on('error', () => {
       if (this.listener === client) this.listener = null;
       void client.end().catch(() => undefined);
