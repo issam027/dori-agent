@@ -1,17 +1,11 @@
-import { CloudHttpError } from './cloud-client.js';
+import { CommandProcessor } from './commands/command-processor.js';
 import type { AgentConfig } from './config.js';
 import type { CloudClient } from './cloud-client.js';
 import type { EngineClient } from './engine-client.js';
 import type { Logger } from './logger.js';
 import { safeError } from './logger.js';
 import type { AgentStore } from './store.js';
-import type {
-  AgentRuntimeStatus,
-  CloudCommand,
-  CommandResult,
-  EngineHealth,
-  Heartbeat,
-} from './types.js';
+import type { AgentRuntimeStatus, EngineHealth, Heartbeat } from './types.js';
 
 export class DorifyAgent {
   private timer: NodeJS.Timeout | null = null;
@@ -22,6 +16,7 @@ export class DorifyAgent {
   private cycleWork: Promise<void> | null = null;
   private controlWork: Promise<boolean> | null = null;
   private readonly status: AgentRuntimeStatus;
+  private readonly commands: CommandProcessor | null;
 
   constructor(
     private readonly config: AgentConfig,
@@ -30,6 +25,7 @@ export class DorifyAgent {
     private readonly cloud: CloudClient | null,
     private readonly log: Logger,
   ) {
+    this.commands = cloud ? new CommandProcessor(store, engine, cloud) : null;
     this.status = {
       enabled: config.enabled,
       startedAt: new Date().toISOString(),
@@ -121,7 +117,10 @@ export class DorifyAgent {
           }),
         );
       if (!(await this.refreshControl()) || this.stopped) return;
-      await this.processCommands(Date.now() + (this.config.syncBudgetMs ?? 10_000));
+      await this.commands?.process(
+        Date.now() + (this.config.syncBudgetMs ?? 10_000),
+        () => !this.stopped && this.status.deploymentStatus === 'active',
+      );
       await this.synchronizeTracking();
       await this.relayNotifications();
       if (this.store.getSyncMetrics)
@@ -242,67 +241,6 @@ export class DorifyAgent {
     };
   }
 
-  private async processCommands(deadline: number): Promise<void> {
-    if (!this.cloud) return;
-    const page = await this.cloud.getCommands(await this.store.getCursor());
-    for (const command of page.commands) {
-      if (this.stopped || Date.now() >= deadline || this.status.deploymentStatus !== 'active')
-        return;
-      if (Date.parse(command.expiresAt) <= Date.now()) {
-        await this.store.setCursor(command.commandId);
-        continue;
-      }
-      const existing = await this.store.reserveCommand(command);
-      if (existing) {
-        if (!existing.result) return; // A live lease must never advance the cursor.
-        await this.cloud.sendCommandResult(existing.result);
-      } else {
-        try {
-          await this.cloud.acknowledgeCommand(command.commandId);
-        } catch (error) {
-          if (!(error instanceof CloudHttpError) || error.status !== 409) throw error;
-          await this.store.completeCommand({
-            commandId: command.commandId,
-            status: 'EXPIRED',
-            completedAt: new Date().toISOString(),
-          });
-          await this.store.setCursor(command.commandId);
-          continue;
-        }
-        const result = await this.executeCommand(command);
-        await this.store.completeCommand(result);
-        await this.cloud.sendCommandResult(result);
-      }
-      // The edge API cursor is the last processed command UUID, including partial pages.
-      await this.store.setCursor(command.commandId);
-    }
-  }
-
-  private async executeCommand(command: CloudCommand): Promise<CommandResult> {
-    if (Date.parse(command.expiresAt) <= Date.now()) {
-      return {
-        commandId: command.commandId,
-        status: 'EXPIRED',
-        completedAt: new Date().toISOString(),
-      };
-    }
-    try {
-      if (command.type === 'RUN_HEALTH_CHECK') {
-        return this.success(command.commandId, { health: await this.engine.health() });
-      }
-      if (command.type === 'SYNC_NOW') return this.success(command.commandId, { accepted: true });
-      return this.failure(command.commandId, 'Unsupported command');
-    } catch (error: unknown) {
-      return this.failure(command.commandId, safeError(error));
-    }
-  }
-
-  private success(commandId: string, output: Record<string, unknown>): CommandResult {
-    return { commandId, status: 'SUCCEEDED', completedAt: new Date().toISOString(), output };
-  }
-  private failure(commandId: string, error: string): CommandResult {
-    return { commandId, status: 'FAILED', completedAt: new Date().toISOString(), error };
-  }
   private schedule(delayMs: number): void {
     if (this.timer) clearTimeout(this.timer);
     if (this.stopped) return;
