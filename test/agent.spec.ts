@@ -403,7 +403,10 @@ it.each(['expired', 'refused'] as const)('never executes a %s command', async (k
   const acknowledgeCommand = vi.fn(async () => {
     throw new CloudHttpError(409);
   });
-  const health = vi.fn(async () => ({ status: 'ok', checkedAt: new Date().toISOString() }));
+  const health = vi.fn(async () => ({
+    status: 'ok' as const,
+    checkedAt: new Date().toISOString(),
+  }));
   const cloud: CloudClient = {
     getInstallationStatus: async () => ({
       installationId: config.installationId as string,
