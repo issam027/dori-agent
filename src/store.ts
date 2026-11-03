@@ -71,6 +71,13 @@ export class PostgresAgentStore implements AgentStore {
         'Dorify agent storage is missing; apply dori-api database migrations before starting the agent',
       );
     }
+    // Replay metadata once after this protocol upgrade, including already acknowledged snapshots.
+    await this.pool.query(`WITH activated AS (
+      INSERT INTO dorify_agent.agent_state(state_key,state_value)
+      VALUES ('tracking_language_v1','enabled') ON CONFLICT(state_key) DO NOTHING RETURNING state_key
+    ) UPDATE dorify.dori_public_tracking_state SET cloud_synced_sequence=0
+      WHERE registration_id IS NOT NULL AND expires_at>CURRENT_TIMESTAMP
+        AND EXISTS(SELECT 1 FROM activated)`);
   }
 
   watchTrackingChanges(onChange: () => void): Promise<void> {
@@ -207,7 +214,7 @@ export class PostgresAgentStore implements AgentStore {
     const result = await this.pool.query(`
       SELECT tracking_token_hash, registration_id, sequence, ticket_number,
              registration_status, position, estimated_wait_minutes, counter_name,
-             queue_public_name, observed_at, expires_at
+             queue_public_name, language_preference, observed_at, expires_at
       FROM dorify.dori_public_tracking_state
       WHERE registration_id IS NOT NULL AND sequence>cloud_synced_sequence
       ORDER BY ${preferLive ? "CASE WHEN registration_status IN ('waiting','in_progress') THEN 0 ELSE 1 END," : ''}
@@ -223,6 +230,7 @@ export class PostgresAgentStore implements AgentStore {
       estimatedWaitMinutes: row.estimated_wait_minutes ?? undefined,
       counterName: row.counter_name ?? undefined,
       queueName: row.queue_public_name,
+      languagePreference: row.language_preference ?? undefined,
       observedAt: new Date(row.observed_at).toISOString(),
       expiresAt: new Date(row.expires_at).toISOString(),
     }));

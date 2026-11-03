@@ -42,6 +42,7 @@ export interface RelayNotification {
 }
 
 export interface TrackingProjection {
+  languagePreference?: string;
   tokenHash: string;
   registrationId: string;
   sequence: number;
