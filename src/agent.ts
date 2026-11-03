@@ -128,8 +128,6 @@ export class DorifyAgent {
       );
       await this.synchronizeTracking();
       await this.relayNotifications();
-      if (this.store.getSyncMetrics)
-        this.status.synchronization = await this.store.getSyncMetrics();
       this.status.lastCloudError = null;
       this.status.consecutiveCloudFailures = 0;
       await this.persistCurrentControl();
@@ -212,6 +210,7 @@ export class DorifyAgent {
     if (sent > 0) this.trackingWakeRequested = true;
     this.status.lastTrackingBatchCount = batches;
     this.status.lastTrackingProjectionCount = sent;
+    if (this.store.getSyncMetrics) this.status.synchronization = await this.store.getSyncMetrics();
   }
 
   private async relayNotifications(): Promise<void> {
