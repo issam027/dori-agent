@@ -12,6 +12,7 @@ export class DorifyAgent {
   private controlTimer: NodeJS.Timeout | null = null;
   private stopped = false;
   private trackingWakeRequested = false;
+  private lastTrackingCheckAt = 0;
   private shutdownWork: Promise<void> | null = null;
   private cycleWork: Promise<void> | null = null;
   private controlWork: Promise<boolean> | null = null;
@@ -25,7 +26,11 @@ export class DorifyAgent {
     private readonly cloud: CloudClient | null,
     private readonly log: Logger,
   ) {
-    this.commands = cloud ? new CommandProcessor(store, engine, cloud) : null;
+    this.commands = cloud
+      ? new CommandProcessor(store, engine, cloud, () => {
+          this.trackingWakeRequested = true;
+        })
+      : null;
     this.status = {
       enabled: config.enabled,
       startedAt: new Date().toISOString(),
@@ -179,6 +184,16 @@ export class DorifyAgent {
 
   private async synchronizeTracking(): Promise<void> {
     if (!this.cloud || this.stopped || this.status.deploymentStatus !== 'active') return;
+    const listening = this.store.isTrackingListenerConnected?.() ?? false;
+    if (
+      listening &&
+      !this.trackingWakeRequested &&
+      this.lastTrackingCheckAt !== 0 &&
+      Date.now() - this.lastTrackingCheckAt < (this.config.realtimeSafetyMs ?? 300000)
+    )
+      return;
+    this.trackingWakeRequested = false;
+    this.lastTrackingCheckAt = Date.now();
     await this.store.refreshTracking();
     const deadline = Date.now() + (this.config.syncBudgetMs ?? 10_000);
     let sent = 0;
@@ -194,6 +209,7 @@ export class DorifyAgent {
       sent += items.length;
       batches++;
     }
+    if (sent > 0) this.trackingWakeRequested = true;
     this.status.lastTrackingBatchCount = batches;
     this.status.lastTrackingProjectionCount = sent;
   }
@@ -245,13 +261,13 @@ export class DorifyAgent {
     if (this.timer) clearTimeout(this.timer);
     if (this.stopped) return;
     this.timer = setTimeout(() => {
-      this.trackingWakeRequested = false;
       void this.runCycle().finally(() => {
         const delay =
-          this.trackingWakeRequested && this.status.consecutiveCloudFailures === 0
+          this.trackingWakeRequested &&
+          this.status.consecutiveCloudFailures === 0 &&
+          this.status.deploymentStatus === 'active'
             ? 100
             : this.nextDelay();
-        this.trackingWakeRequested = false;
         this.schedule(delay);
       });
     }, delayMs);

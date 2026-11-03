@@ -8,7 +8,7 @@ import { PostgresAgentStore } from './store.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const store = new PostgresAgentStore(config.databaseUrl);
+  const store = new PostgresAgentStore(config.databaseUrl, config.databaseOptions);
   const engine = new HttpEngineClient(config);
   const cloud = createCloudClient(config);
   const agent = new DorifyAgent(config, store, engine, cloud, logger);

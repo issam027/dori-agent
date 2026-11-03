@@ -10,6 +10,7 @@ export class CommandProcessor {
     private readonly store: AgentStore,
     private readonly engine: EngineClient,
     private readonly cloud: CloudClient,
+    private readonly requestSync: () => void = () => undefined,
   ) {}
   async process(deadline: number, shouldContinue: () => boolean): Promise<void> {
     const page = await this.cloud.getCommands(await this.store.getCursor());
@@ -57,7 +58,10 @@ export class CommandProcessor {
       if (command.type === 'RUN_HEALTH_CHECK') {
         return this.success(command.commandId, { health: await this.engine.health() });
       }
-      if (command.type === 'SYNC_NOW') return this.success(command.commandId, { accepted: true });
+      if (command.type === 'SYNC_NOW') {
+        this.requestSync();
+        return this.success(command.commandId, { accepted: true });
+      }
       return this.failure(command.commandId, 'Unsupported command');
     } catch (error: unknown) {
       return this.failure(command.commandId, safeError(error));

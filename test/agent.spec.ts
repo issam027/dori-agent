@@ -367,6 +367,7 @@ describe('agent operational guarantees', () => {
     const store = new MemoryStore();
     let changed: () => void = () => undefined;
     Object.assign(store, {
+      isTrackingListenerConnected: () => true,
       watchTrackingChanges: (callback: () => void) => {
         changed = callback;
         return Promise.resolve();
@@ -427,4 +428,56 @@ it.each(['expired', 'refused'] as const)('never executes a %s command', async (k
   expect(cloud.sendCommandResult).not.toHaveBeenCalled();
   expect(acknowledgeCommand).toHaveBeenCalledTimes(kind === 'expired' ? 0 : 1);
   expect(store.cursor).toBe(command.commandId);
+});
+
+it('does not inspect tracking during healthy idle cycles, but recovers on safety or listener loss', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-11-03T10:00:00Z'));
+  let connected = true;
+  const store = Object.assign(new MemoryStore(), { isTrackingListenerConnected: () => connected });
+  const refresh = vi.spyOn(store, 'refreshTracking');
+  const cloud: CloudClient = {
+    getInstallationStatus: async () => ({
+      installationId: config.installationId as string,
+      deploymentStatus: 'active',
+      checkedAt: new Date().toISOString(),
+    }),
+    sendHeartbeat: async () => undefined,
+    getCommands: async () => ({ commands: [], nextCursor: null }),
+    acknowledgeCommand: async () => undefined,
+    sendCommandResult: async () => undefined,
+    relayNotification: async () => undefined,
+    syncTracking: async () => undefined,
+  };
+  const agent = new DorifyAgent(config, store, engine, cloud, silentLogger);
+  try {
+    await agent.runCycle();
+    expect(refresh).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(30000);
+    await agent.runCycle();
+    expect(refresh).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(270000);
+    await agent.runCycle();
+    expect(refresh).toHaveBeenCalledTimes(2);
+    vi.spyOn(cloud, 'getCommands').mockResolvedValueOnce({
+      commands: [
+        {
+          commandId: '00000000-0000-4000-8000-000000000099',
+          type: 'SYNC_NOW',
+          payload: {},
+          createdAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 60000).toISOString(),
+        },
+      ],
+      nextCursor: null,
+    });
+    await agent.runCycle();
+    expect(refresh).toHaveBeenCalledTimes(3);
+    connected = false;
+    await agent.runCycle();
+    expect(refresh).toHaveBeenCalledTimes(4);
+  } finally {
+    await agent.stop();
+    vi.useRealTimers();
+  }
 });

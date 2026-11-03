@@ -1,3 +1,4 @@
+import type { AgentConfig } from './config.js';
 import pg from 'pg';
 import type {
   CloudCommand,
@@ -18,6 +19,7 @@ export interface StoredCommand {
 export interface AgentStore {
   initialize(): Promise<void>;
   watchTrackingChanges?(onChange: () => void): Promise<void>;
+  isTrackingListenerConnected?(): boolean;
   close(): Promise<void>;
   ping(): Promise<void>;
   getCursor(): Promise<string | null>;
@@ -46,11 +48,21 @@ export class PostgresAgentStore implements AgentStore {
   private listenerWork: Promise<void> | null = null;
   private closing = false;
 
-  constructor(private readonly databaseUrl: string) {
+  constructor(
+    private readonly databaseUrl: string,
+    private readonly options?: AgentConfig['databaseOptions'],
+  ) {
     this.pool = new Pool({
       connectionString: databaseUrl,
-      max: 3,
-      connectionTimeoutMillis: 10_000,
+      application_name: 'dorify-agent',
+      max: options?.poolMax ?? 3,
+      connectionTimeoutMillis: options?.connectionTimeoutMs ?? 5000,
+      statement_timeout: options?.statementTimeoutMs ?? 30000,
+      query_timeout: (options?.statementTimeoutMs ?? 30000) + 5000,
+      lock_timeout: options?.lockTimeoutMs ?? 3000,
+      idle_in_transaction_session_timeout: options?.idleTransactionTimeoutMs ?? 15000,
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 10000,
     });
   }
 
@@ -92,9 +104,13 @@ export class PostgresAgentStore implements AgentStore {
 
   private async openTrackingListener(onChange: () => void): Promise<void> {
     const client = new pg.Client({
-      connectionString: this.databaseUrl,
-      connectionTimeoutMillis: 10_000,
-      query_timeout: 10_000,
+      connectionString: this.options?.listenUrl ?? this.databaseUrl,
+      application_name: 'dorify-agent-listener',
+      connectionTimeoutMillis: this.options?.connectionTimeoutMs ?? 5000,
+      statement_timeout: 5000,
+      query_timeout: 6000,
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 10000,
     });
     this.listener = client;
     client.on('notification', (message) => {
@@ -115,6 +131,10 @@ export class PostgresAgentStore implements AgentStore {
       await client.end().catch(() => undefined);
       throw error;
     }
+  }
+
+  isTrackingListenerConnected(): boolean {
+    return this.listener !== null && !this.closing;
   }
 
   async close(): Promise<void> {

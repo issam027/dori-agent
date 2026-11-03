@@ -25,3 +25,9 @@ describe('loadConfig', () => {
     expect(config.cloudUrl).toBe('https://cloud.dorify.app');
   });
 });
+
+it('rejects a PostgreSQL budget exhausted by API replicas and agent listeners', () => {
+  expect(() =>
+    loadConfig({ DATABASE_URL: databaseUrl, DB_API_INSTANCES: '10', DB_POOL_MAX: '10' }),
+  ).toThrow('budget exceeded');
+});
