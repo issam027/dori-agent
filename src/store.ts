@@ -43,9 +43,15 @@ export interface AgentStore {
 export class PostgresAgentStore implements AgentStore {
   private readonly pool: pg.Pool;
   private listener: pg.Client | null = null;
+  private listenerWork: Promise<void> | null = null;
+  private closing = false;
 
   constructor(private readonly databaseUrl: string) {
-    this.pool = new Pool({ connectionString: databaseUrl, max: 3 });
+    this.pool = new Pool({
+      connectionString: databaseUrl,
+      max: 3,
+      connectionTimeoutMillis: 10_000,
+    });
   }
 
   async initialize(): Promise<void> {
@@ -67,11 +73,25 @@ export class PostgresAgentStore implements AgentStore {
     }
   }
 
-  async watchTrackingChanges(onChange: () => void): Promise<void> {
-    if (this.listener) return;
-    const client = new pg.Client({ connectionString: this.databaseUrl });
+  watchTrackingChanges(onChange: () => void): Promise<void> {
+    if (this.closing) return Promise.resolve();
+    if (this.listenerWork) return this.listenerWork;
+    if (this.listener) return Promise.resolve();
+    this.listenerWork = this.openTrackingListener(onChange).finally(() => {
+      this.listenerWork = null;
+    });
+    return this.listenerWork;
+  }
+
+  private async openTrackingListener(onChange: () => void): Promise<void> {
+    const client = new pg.Client({
+      connectionString: this.databaseUrl,
+      connectionTimeoutMillis: 10_000,
+      query_timeout: 10_000,
+    });
+    this.listener = client;
     client.on('notification', (message) => {
-      if (message.channel === 'dorify_tracking_dirty') onChange();
+      if (!this.closing && message.channel === 'dorify_tracking_dirty') onChange();
     });
     client.on('end', () => {
       if (this.listener === client) this.listener = null;
@@ -82,15 +102,17 @@ export class PostgresAgentStore implements AgentStore {
     });
     try {
       await client.connect();
-      await client.query('LISTEN dorify_tracking_dirty');
-      this.listener = client;
+      if (!this.closing) await client.query('LISTEN dorify_tracking_dirty');
     } catch (error) {
+      if (this.listener === client) this.listener = null;
       await client.end().catch(() => undefined);
       throw error;
     }
   }
 
   async close(): Promise<void> {
+    this.closing = true;
+    await this.listenerWork?.catch(() => undefined);
     const listener = this.listener;
     this.listener = null;
     await listener?.end().catch(() => undefined);
