@@ -12,6 +12,7 @@ export class DorifyAgent {
   private controlTimer: NodeJS.Timeout | null = null;
   private stopped = false;
   private trackingWakeRequested = false;
+  private controlUnavailable = false;
   private lastTrackingCheckAt = 0;
   private shutdownWork: Promise<void> | null = null;
   private cycleWork: Promise<void> | null = null;
@@ -140,9 +141,22 @@ export class DorifyAgent {
 
   private refreshControl(): Promise<boolean> {
     if (this.controlWork) return this.controlWork;
-    this.controlWork = this.performControl().finally(() => {
-      this.controlWork = null;
-    });
+    this.controlWork = this.performControl()
+      .then((available) => {
+        if (available && this.controlUnavailable) {
+          this.controlUnavailable = false;
+          this.trackingWakeRequested = true;
+          if (!this.cycleWork) this.schedule(0);
+        }
+        return available;
+      })
+      .catch((error: unknown) => {
+        this.controlUnavailable = true;
+        throw error;
+      })
+      .finally(() => {
+        this.controlWork = null;
+      });
     return this.controlWork;
   }
 
@@ -162,10 +176,12 @@ export class DorifyAgent {
     const health = await this.engine.health();
     await this.cloud.sendHeartbeat(this.heartbeat(health));
     this.status.lastHeartbeatAt = new Date().toISOString();
+
     return true;
   }
 
   private async recordFailure(error: unknown): Promise<void> {
+    this.trackingWakeRequested = true;
     this.status.consecutiveCloudFailures += 1;
     this.status.lastCloudError = safeError(error);
     if (!this.stopped) {

@@ -481,3 +481,84 @@ it('does not inspect tracking during healthy idle cycles, but recovers on safety
     vi.useRealTimers();
   }
 });
+
+it('retains a consumed tracking wake across a failed transfer', async () => {
+  vi.useFakeTimers();
+  const store = Object.assign(new MemoryStore(), { isTrackingListenerConnected: () => true });
+  const refresh = vi.spyOn(store, 'refreshTracking');
+  let unavailable = true;
+  const cloud: CloudClient = {
+    getInstallationStatus: async () => ({
+      installationId: config.installationId as string,
+      deploymentStatus: 'active',
+      checkedAt: new Date().toISOString(),
+    }),
+    sendHeartbeat: async () => undefined,
+    getCommands: async () => ({ commands: [], nextCursor: null }),
+    acknowledgeCommand: async () => undefined,
+    sendCommandResult: async () => undefined,
+    relayNotification: async () => undefined,
+    syncTracking: vi.fn(async () => {
+      if (unavailable) throw new Error('cloud unavailable');
+    }),
+  };
+  vi.spyOn(store, 'listUnsyncedTracking')
+    .mockResolvedValueOnce([{} as import('../src/types.js').TrackingProjection])
+    .mockResolvedValue([]);
+  const agent = new DorifyAgent(config, store, engine, cloud, silentLogger);
+  try {
+    await agent.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(agent.getStatus().consecutiveCloudFailures).toBe(1);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    unavailable = false;
+    // Healthy heartbeats must not lose a failed transfer's wake signal.
+    // Retry on the normal backoff, without waiting for five-minute safety.
+    await vi.advanceTimersByTimeAsync(40100);
+    expect(refresh.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(agent.getStatus().consecutiveCloudFailures).toBe(0);
+  } finally {
+    await agent.stop();
+    vi.useRealTimers();
+  }
+});
+
+it('wakes a backed-off cycle when the control channel becomes reachable again', async () => {
+  vi.useFakeTimers();
+  let available = false;
+  const store = Object.assign(new MemoryStore(), { isTrackingListenerConnected: () => true });
+  const refresh = vi.spyOn(store, 'refreshTracking');
+  const cloud: CloudClient = {
+    getInstallationStatus: async () => {
+      if (!available) throw new Error('offline');
+      return {
+        installationId: config.installationId as string,
+        deploymentStatus: 'active',
+        checkedAt: new Date().toISOString(),
+      };
+    },
+    sendHeartbeat: async () => undefined,
+    getCommands: async () => ({ commands: [], nextCursor: null }),
+    acknowledgeCommand: async () => undefined,
+    sendCommandResult: async () => undefined,
+    relayNotification: async () => undefined,
+    syncTracking: async () => undefined,
+  };
+  const agent = new DorifyAgent(config, store, engine, cloud, silentLogger);
+  try {
+    // Accumulate backoff before starting the periodic control timer.
+    await agent.runCycle();
+    await agent.runCycle();
+    await agent.runCycle();
+    await agent.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(refresh).not.toHaveBeenCalled();
+    available = true;
+    await vi.advanceTimersByTimeAsync(30100);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(agent.getStatus().consecutiveCloudFailures).toBe(0);
+  } finally {
+    await agent.stop();
+    vi.useRealTimers();
+  }
+});
