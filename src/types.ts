@@ -56,10 +56,23 @@ export interface TrackingProjection {
   expiresAt: string;
 }
 
+export const installationAnnouncementSchema = z
+  .object({
+    announcementId: z.uuid(),
+    title: z.string().trim().min(1).max(120),
+    message: z.string().trim().min(1).max(2000),
+    severity: z.enum(['info', 'warning', 'critical']),
+    startsAt: z.iso.datetime({ offset: true }),
+    endsAt: z.iso.datetime({ offset: true }),
+  })
+  .refine((item) => Date.parse(item.endsAt) > Date.parse(item.startsAt));
+export type InstallationAnnouncement = z.infer<typeof installationAnnouncementSchema>;
+
 export const installationStatusSchema = z.object({
   installationId: z.uuid(),
   deploymentStatus: z.enum(['active', 'revoked']),
   checkedAt: z.iso.datetime(),
+  announcements: z.array(installationAnnouncementSchema).max(50).optional(),
 });
 export type InstallationStatus = z.infer<typeof installationStatusSchema>;
 

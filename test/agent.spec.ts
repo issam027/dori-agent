@@ -47,6 +47,9 @@ class MemoryStore implements AgentStore {
   async saveDeploymentControl(state: DeploymentControlState) {
     this.control = { ...state };
   }
+  async saveInstallationAnnouncements(
+    _items: import('../src/types.js').InstallationAnnouncement[],
+  ) {}
   async reserveCommand(command: CloudCommand) {
     const existing = this.commands.get(command.commandId);
     if (existing) return existing;
@@ -561,4 +564,47 @@ it('wakes a backed-off cycle when the control channel becomes reachable again', 
     await agent.stop();
     vi.useRealTimers();
   }
+});
+
+it('persists installation notices even when revoked, preserves them offline and propagates withdrawal', async () => {
+  const store = new MemoryStore();
+  const save = vi.spyOn(store, 'saveInstallationAnnouncements');
+  const notice = {
+    announcementId: '00000000-0000-4000-8000-000000000002',
+    title: 'Maintenance',
+    message: 'Test notice',
+    severity: 'warning' as const,
+    startsAt: new Date().toISOString(),
+    endsAt: new Date(Date.now() + 60000).toISOString(),
+  };
+  let offline = false;
+  let notices = [notice];
+  const cloud: CloudClient = {
+    getInstallationStatus: async () => {
+      if (offline) throw new Error('offline');
+      return {
+        installationId: config.installationId as string,
+        deploymentStatus: 'revoked',
+        checkedAt: new Date().toISOString(),
+        announcements: notices,
+      };
+    },
+    sendHeartbeat: async () => undefined,
+    getCommands: async () => ({ commands: [], nextCursor: null }),
+    acknowledgeCommand: async () => undefined,
+    sendCommandResult: async () => undefined,
+    relayNotification: async () => undefined,
+    syncTracking: async () => undefined,
+  };
+  const agent = new DorifyAgent(config, store, engine, cloud, silentLogger);
+  await agent.runCycle();
+  expect(save).toHaveBeenLastCalledWith([notice]);
+  offline = true;
+  await agent.runCycle();
+  expect(save).toHaveBeenCalledTimes(1);
+  offline = false;
+  notices = [];
+  await agent.runCycle();
+  expect(save).toHaveBeenLastCalledWith([]);
+  await agent.stop();
 });

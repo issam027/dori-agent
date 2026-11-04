@@ -5,6 +5,7 @@ import type {
   CommandResult,
   CommandResultStatus,
   DeploymentControlState,
+  InstallationAnnouncement,
   RelayNotification,
   TrackingProjection,
 } from './types.js';
@@ -26,6 +27,7 @@ export interface AgentStore {
   setCursor(cursor: string): Promise<void>;
   getDeploymentControl(): Promise<DeploymentControlState | null>;
   saveDeploymentControl(state: DeploymentControlState): Promise<void>;
+  saveInstallationAnnouncements(items: InstallationAnnouncement[]): Promise<void>;
   reserveCommand(command: CloudCommand): Promise<StoredCommand | null>;
   completeCommand(result: CommandResult): Promise<void>;
   refreshTracking(): Promise<void>;
@@ -198,6 +200,17 @@ export class PostgresAgentStore implements AgentStore {
        SELECT pg_notify('dorify_realtime', json_build_object('key', 'edge-local-status')::text)
        FROM saved`,
       [JSON.stringify(state)],
+    );
+  }
+
+  async saveInstallationAnnouncements(items: InstallationAnnouncement[]): Promise<void> {
+    await this.pool.query(
+      `WITH saved AS (
+         INSERT INTO dorify_agent.agent_state(state_key,state_value) VALUES('installation_announcements',$1)
+         ON CONFLICT(state_key) DO UPDATE SET state_value=EXCLUDED.state_value,updated_at=CURRENT_TIMESTAMP
+         WHERE agent_state.state_value IS DISTINCT FROM EXCLUDED.state_value RETURNING state_key
+       ) SELECT pg_notify('dorify_realtime','{"key":"announcements"}') FROM saved`,
+      [JSON.stringify([...items].sort((a, b) => a.announcementId.localeCompare(b.announcementId)))],
     );
   }
 

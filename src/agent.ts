@@ -64,6 +64,7 @@ export class DorifyAgent {
     ) {
       Object.assign(this.status, persisted);
     } else if (persisted) {
+      await this.store.saveInstallationAnnouncements([]);
       await this.store.saveDeploymentControl({
         installationId: this.config.installationId,
         deploymentStatus: 'unknown',
@@ -166,6 +167,8 @@ export class DorifyAgent {
     if (installation.installationId !== this.config.installationId) {
       throw new Error('Cloud returned a status for another installation');
     }
+    if (installation.announcements !== undefined)
+      await this.store.saveInstallationAnnouncements(installation.announcements);
     Object.assign(this.status, {
       deploymentStatus: installation.deploymentStatus,
       lastStatusCheckedAt: installation.checkedAt,
