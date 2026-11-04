@@ -187,10 +187,16 @@ export class PostgresAgentStore implements AgentStore {
 
   async saveDeploymentControl(state: DeploymentControlState): Promise<void> {
     await this.pool.query(
-      `INSERT INTO dorify_agent.agent_state (state_key, state_value)
-       VALUES ('deployment_control', $1)
-       ON CONFLICT (state_key) DO UPDATE
-       SET state_value = EXCLUDED.state_value, updated_at = CURRENT_TIMESTAMP`,
+      `WITH saved AS (
+         INSERT INTO dorify_agent.agent_state (state_key, state_value)
+         VALUES ('deployment_control', $1)
+         ON CONFLICT (state_key) DO UPDATE
+         SET state_value = EXCLUDED.state_value, updated_at = CURRENT_TIMESTAMP
+         WHERE agent_state.state_value IS DISTINCT FROM EXCLUDED.state_value
+         RETURNING state_key
+       )
+       SELECT pg_notify('dorify_realtime', json_build_object('key', 'edge-local-status')::text)
+       FROM saved`,
       [JSON.stringify(state)],
     );
   }
